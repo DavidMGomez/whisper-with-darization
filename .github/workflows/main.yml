@@ -5,7 +5,7 @@ on:
     inputs:
       model_name:
         required: true
-        description: "davidmgomez/whisper-with-diarization"
+        description: "xiriustech/whisper-with-darization"
 
 jobs:
   build:
