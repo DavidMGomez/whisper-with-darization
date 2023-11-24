@@ -51,9 +51,9 @@ class Predictor(BasePredictor):
     def segment_embedding(self,
                           segment,
                           path):
-        start = segment["start"]
-        end = segment["end"]
-        delta = float(end)-float(start)
+        start = float(segment["start"])
+        end = float(segment["end"])
+        delta = end-start
         if delta>0.3:
             clip = Segment(start, end)
             return self.inference.crop(path, clip)
