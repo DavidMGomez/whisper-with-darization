@@ -20,6 +20,11 @@ import re
 from cog import BasePredictor, BaseModel, Input, File, Path
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
+from pyannote.audio import Audio
+from pyannote.core import Segment
+from pyannote.audio import Model
+from pyannote.audio import Inference
+
 
 
 class Output(BaseModel):
@@ -37,9 +42,23 @@ class Predictor(BasePredictor):
             compute_type="float16")
         self.diarization_model = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.0",
-            use_auth_token="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").to(
+            use_auth_token="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").to(
                 torch.device("cuda"))
+        self.embedding_model = Model.from_pretrained("pyannote/embedding", 
+                              use_auth_token="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")
+        self.inference = Inference(self.embedding_model, window="whole")
 
+    def segment_embedding(self,
+                          segment,
+                          path):
+        start = segment["start"]
+        end = segment["end"]
+        delta = float(end)-float(start)
+        if delta>0.3:
+            clip = Segment(start, end)
+            return self.inference.crop(path, clip)
+        return []
+    
     def predict(
         self,
         file_string: str = Input(
@@ -235,9 +254,11 @@ class Predictor(BasePredictor):
             'end': str(segments[0]["end"]),
             'speaker': segments[0]["speaker"],
             'text': segments[0]["text"],
-            'words': segments[0]["words"]
+            'words': segments[0]["words"],
+            'embeddingSpeaker':[]
         }
-
+        
+        
         for i in range(1, len(segments)):
             # Calculate time gap between consecutive segments
             time_gap = segments[i]["start"] - segments[i - 1]["end"]
@@ -249,19 +270,25 @@ class Predictor(BasePredictor):
                 current_group["text"] += " " + segments[i]["text"]
                 current_group["words"] += segments[i]["words"]
             else:
+                embedding_speaker = self.segment_embedding(current_group,audio_file_wav)
                 # Add the current_group to the output list
+                current_group["embeddingSpeaker"] = embedding_speaker
                 output.append(current_group)
-
+                
                 # Start a new group with the current segment
                 current_group = {
                     'start': str(segments[i]["start"]),
                     'end': str(segments[i]["end"]),
                     'speaker': segments[i]["speaker"],
                     'text': segments[i]["text"],
-                    'words': segments[i]["words"]
+                    'words': segments[i]["words"],
+                    'embeddingSpeaker':[]
                 }
 
         # Add the last group to the output list
+        embedding_speaker = self.segment_embedding(current_group,audio_file_wav)
+        # Add the current_group to the output list
+        current_group["embeddingSpeaker"] = embedding_speaker
         output.append(current_group)
 
         time_cleaning_end = time.time()
