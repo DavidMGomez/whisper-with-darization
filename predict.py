@@ -259,37 +259,17 @@ class Predictor(BasePredictor):
         }
         
         
-        for i in range(1, len(segments)):
-            # Calculate time gap between consecutive segments
-            time_gap = segments[i]["start"] - segments[i - 1]["end"]
-
-            # If the current segment's speaker is the same as the previous segment's speaker, and the time gap is less than or equal to 2 seconds, group them
-            if segments[i]["speaker"] == segments[
-                    i - 1]["speaker"] and time_gap <= 2 and group_segments:
-                current_group["end"] = str(segments[i]["end"])
-                current_group["text"] += " " + segments[i]["text"]
-                current_group["words"] += segments[i]["words"]
-            else:
-                embedding_speaker = self.segment_embedding(current_group,audio_file_wav)
-                # Add the current_group to the output list
-                current_group["embeddingSpeaker"] = embedding_speaker
-                output.append(current_group)
-                
-                # Start a new group with the current segment
-                current_group = {
-                    'start': str(segments[i]["start"]),
-                    'end': str(segments[i]["end"]),
-                    'speaker': segments[i]["speaker"],
-                    'text': segments[i]["text"],
-                    'words': segments[i]["words"],
-                    'embeddingSpeaker':[]
-                }
-
-        # Add the last group to the output list
-        embedding_speaker = self.segment_embedding(current_group,audio_file_wav)
-        # Add the current_group to the output list
-        current_group["embeddingSpeaker"] = embedding_speaker
-        output.append(current_group)
+        for i in range(0, len(segments)):
+            embedding_speaker = self.segment_embedding(current_group,audio_file_wav)
+            current_group = {
+                'start': str(segments[i]["start"]),
+                'end': str(segments[i]["end"]),
+                'speaker': segments[i]["speaker"],
+                'text': segments[i]["text"],
+                'words': segments[i]["words"],
+                'embeddingSpeaker':embedding_speaker
+            }
+            output.append(current_group)
 
         time_cleaning_end = time.time()
         print(
