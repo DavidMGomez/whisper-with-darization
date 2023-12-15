@@ -65,7 +65,7 @@ class Predictor(BasePredictor):
                 torch.device("cuda"))
         # Define the model here.
         self.deep_speaker_model = DeepSpeakerModel()      
-        self.deep_speaker_model.m.load_weights('ResCNN_triplet_training_checkpoint_265.h5', by_name=True)
+        
         
     def sample_from_mfcc(self,mfcc, max_length):
         if mfcc.shape[0] >= max_length:
@@ -313,6 +313,7 @@ class Predictor(BasePredictor):
             'embeddingSpeaker':[]
         }
         
+        self.deep_speaker_model.m.load_weights('ResCNN_triplet_training_checkpoint_265.h5', by_name=True)
         
         for i in range(0, len(segments)):
             embedding_speaker = self.segment_embedding(current_group,audio_file_wav)
