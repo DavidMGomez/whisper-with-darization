@@ -24,6 +24,25 @@ from pyannote.audio import Audio
 from pyannote.core import Segment
 from pyannote.audio import Model
 from pyannote.audio import Inference
+import random
+import numpy as np
+import librosa 
+from deep_speaker.audio import read_mfcc,mfcc_fbank
+from deep_speaker.batcher import pad_mfcc
+from random import choice
+from deep_speaker.constants import SAMPLE_RATE, NUM_FRAMES
+from deep_speaker.conv_models import DeepSpeakerModel
+from deep_speaker.test import batch_cosine_similarity
+
+
+def sample_from_mfcc(mfcc, max_length):
+    if mfcc.shape[0] >= max_length:
+        r = choice(range(0, len(mfcc) - max_length + 1))
+        s = mfcc[r:r + max_length]
+    else:
+        s = pad_mfcc(mfcc, max_length)
+    return np.expand_dims(s, axis=-1)
+
 
 
 
@@ -44,21 +63,57 @@ class Predictor(BasePredictor):
             "pyannote/speaker-diarization-3.0",
             use_auth_token="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").to(
                 torch.device("cuda"))
-        self.embedding_model = Model.from_pretrained("pyannote/embedding", 
-                              use_auth_token="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")
-        self.inference = Inference(self.embedding_model, window="whole")
+        # Define the model here.
+        self.deep_speaker_model = DeepSpeakerModel()      
+        self.deep_speaker_model.m.load_weights('ResCNN_triplet_training_checkpoint_265.h5', by_name=True)
+        
+    def sample_from_mfcc(self,mfcc, max_length):
+        if mfcc.shape[0] >= max_length:
+            r = choice(range(0, len(mfcc) - max_length + 1))
+            s = mfcc[r:r + max_length]
+        else:
+            s = pad_mfcc(mfcc, max_length)
+        return np.expand_dims(s, axis=-1)
+    
+    def read_segment_mfcc(self, path,segment, sample_rate):
+        audio = self.read_audio_segment_mfcc(segment,path,SAMPLE_RATE)
+        energy = np.abs(audio)
+        silence_threshold = np.percentile(energy, 95)
+        offsets = np.where(energy > silence_threshold)[0]
+        audio_voice_only = audio[offsets[0]:offsets[-1]]
+        mfcc = mfcc_fbank(audio_voice_only, sample_rate)
+        return mfcc
+
+    
+    def read_audio_segment_mfcc(self, segment, path,sample_rate):
+        # Convertir start y end a flotantes
+        start = float(segment["start"])
+        end = float(segment["end"])
+        # Calcular la duración total del audio
+        total_duration = end - start
+        # Duración deseada del segmento en segundos (6 segundos)
+        desired_duration = 10
+        # Si el audio es menor de 6 segundos, usar el segmento completo
+        if total_duration <= desired_duration:
+            segment_start = start
+            segment_end = end
+        else:
+            # Calcular el punto medio del audio
+            mid_point = start + total_duration / 2
+            # Ajustar el inicio y el fin para obtener un segmento de 6 segundos desde el centro
+            segment_start = max(start, mid_point - desired_duration / 2)
+            segment_end = min(end, mid_point + desired_duration / 2)
+            # Cargar el segmento de audio con librosa
+        y, sr = librosa.load(path, sr=sample_rate, offset=segment_start, duration=segment_end - segment_start, mono=True, dtype=np.float32)
+        return y
+
 
     def segment_embedding(self,
                           segment,
                           path):
-        start = float(segment["start"])
-        end = float(segment["end"])
-        delta = end-start
-        if delta>0.3:
-            clip = Segment(start, end)
-            return self.inference.crop(path, clip)
-        return []
-    
+        mfcc = self.sample_from_mfcc(self.read_segment_mfcc(path, segment ,SAMPLE_RATE),NUM_FRAMES)
+        return self.deep_speaker_model.m.predict(np.expand_dims(mfcc, axis=0))
+
     def predict(
         self,
         file_string: str = Input(
