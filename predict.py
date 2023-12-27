@@ -89,21 +89,8 @@ class Predictor(BasePredictor):
         # Convertir start y end a flotantes
         start = float(segment["start"])
         end = float(segment["end"])
-        # Calcular la duración total del audio
-        total_duration = end - start
-        # Duración deseada del segmento en segundos (6 segundos)
-        desired_duration = 10
-        # Si el audio es menor de 6 segundos, usar el segmento completo
-        if total_duration <= desired_duration:
-            segment_start = start
-            segment_end = end
-        else:
-            # Calcular el punto medio del audio
-            mid_point = start + total_duration / 2
-            # Ajustar el inicio y el fin para obtener un segmento de 6 segundos desde el centro
-            segment_start = max(start, mid_point - desired_duration / 2)
-            segment_end = min(end, mid_point + desired_duration / 2)
-            # Cargar el segmento de audio con librosa
+        segment_start = start
+        segment_end = end
         y, sr = librosa.load(path, sr=sample_rate, offset=segment_start, duration=segment_end - segment_start, mono=True, dtype=np.float32)
         return y
 
@@ -303,28 +290,20 @@ class Predictor(BasePredictor):
         # Make output
         output = []  # Initialize an empty list for the output
 
-        # Initialize the first group with the first segment
-        current_group = {
-            'start': str(segments[0]["start"]),
-            'end': str(segments[0]["end"]),
-            'speaker': segments[0]["speaker"],
-            'text': segments[0]["text"],
-            'words': segments[0]["words"],
-            'embeddingSpeaker':[]
-        }
         self.deep_speaker_model = DeepSpeakerModel()      
         self.deep_speaker_model.m.load_weights('ResCNN_triplet_training_checkpoint_265.h5', by_name=True)
         
         for i in range(0, len(segments)):
-            embedding_speaker = self.segment_embedding(current_group,audio_file_wav)
             current_group = {
                 'start': str(segments[i]["start"]),
                 'end': str(segments[i]["end"]),
                 'speaker': segments[i]["speaker"],
                 'text': segments[i]["text"],
                 'words': segments[i]["words"],
-                'embeddingSpeaker':embedding_speaker
+                'embeddingSpeaker':[]
             }
+            embedding_speaker = self.segment_embedding(current_group,audio_file_wav)
+            current_group["embeddingSpeaker"] = embedding_speaker
             output.append(current_group)
 
         time_cleaning_end = time.time()
