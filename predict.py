@@ -44,8 +44,6 @@ def sample_from_mfcc(mfcc, max_length):
     return np.expand_dims(s, axis=-1)
 
 
-
-
 class Output(BaseModel):
     segments: list
 
@@ -57,8 +55,7 @@ class Predictor(BasePredictor):
         model_name = "large-v2"
         self.model = WhisperModel(
             model_name,
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            compute_type="float16")
+            device="cuda" if torch.cuda.is_available() else "cpu")
         self.diarization_model = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.0",
             use_auth_token="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").to(
@@ -112,11 +109,11 @@ class Predictor(BasePredictor):
         group_segments: bool = Input(
             description=
             "Group segments of same speaker shorter apart than 2 seconds",
-            default=True),
+            default=False),
         num_speakers: int = Input(description="Number of speakers",
                                   ge=1,
                                   le=50,
-                                  default=2),
+                                  default=11),
         prompt: str = Input(description="Prompt, to be used as context",
                             default="Some people speaking."),
         offset_seconds: int = Input(
@@ -189,10 +186,10 @@ class Predictor(BasePredictor):
 
     def speech_to_text(self,
                        audio_file_wav,
-                       num_speakers=2,
+                       num_speakers=10,
                        prompt="People takling.",
                        offset_seconds=0,
-                       group_segments=True):
+                       group_segments=False):
         time_start = time.time()
 
         # Transcribe audio
