@@ -169,4 +169,5 @@ class Predictor(BasePredictor):
             '1', '-c:a', 'pcm_s16le', temp_wav_filename
         ])
         if os.path.exists(temp_audio_filename):
+            print("removing "+temp_audio_filename)
             os.remove(temp_audio_filename)
