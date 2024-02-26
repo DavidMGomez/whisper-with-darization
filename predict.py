@@ -42,7 +42,7 @@ class Predictor(BasePredictor):
                             default=8)
     ) -> Output:
         random_uuid = uuid.uuid4()
-        vocal_target  = f"temp-{random_uuid}.wav"
+        vocal_target  = f"./temp-{random_uuid}.wav"
         folder_outs = f"temp_{random_uuid}_outputs"
     
         try:
