@@ -16,6 +16,12 @@ import time
 import torch
 import wave
 import re
+import whisperx
+import uuid
+from helpers import *
+from pydub import AudioSegment
+from nemo.collections.asr.models.msdd_models import NeuralDiarizer
+from deepmultilingualpunctuation import PunctuationModel
 
 from cog import BasePredictor, BaseModel, Input, File, Path
 from faster_whisper import WhisperModel
@@ -34,24 +40,14 @@ from deep_speaker.constants import SAMPLE_RATE, NUM_FRAMES
 from deep_speaker.conv_models import DeepSpeakerModel
 from deep_speaker.test import batch_cosine_similarity
 
-
-def sample_from_mfcc(mfcc, max_length):
-    if mfcc.shape[0] >= max_length:
-        r = choice(range(0, len(mfcc) - max_length + 1))
-        s = mfcc[r:r + max_length]
-    else:
-        s = pad_mfcc(mfcc, max_length)
-    return np.expand_dims(s, axis=-1)
-
+mtypes = {"cpu": "int8", "cuda": "float16"}
 
 class Output(BaseModel):
     segments: list
 
 
 class Predictor(BasePredictor):
-
     def setup(self):
-        """Load the model into memory to make running multiple predictions efficient"""
         model_name = "large-v2"
         self.model = WhisperModel(
             model_name,
@@ -62,254 +58,142 @@ class Predictor(BasePredictor):
                 torch.device("cuda"))
         # Define the model here.
         
-        
-        
-    def sample_from_mfcc(self,mfcc, max_length):
-        if mfcc.shape[0] >= max_length:
-            r = choice(range(0, len(mfcc) - max_length + 1))
-            s = mfcc[r:r + max_length]
-        else:
-            s = pad_mfcc(mfcc, max_length)
-        return np.expand_dims(s, axis=-1)
-    
-    def read_segment_mfcc(self, path,segment, sample_rate):
-        audio = self.read_audio_segment_mfcc(segment,path,SAMPLE_RATE)
-        energy = np.abs(audio)
-        silence_threshold = np.percentile(energy, 95)
-        offsets = np.where(energy > silence_threshold)[0]
-        audio_voice_only = audio[offsets[0]:offsets[-1]]
-        mfcc = mfcc_fbank(audio_voice_only, sample_rate)
-        return mfcc
-
-    
-    def read_audio_segment_mfcc(self, segment, path,sample_rate):
-        # Convertir start y end a flotantes
-        start = float(segment["start"])
-        end = float(segment["end"])
-        segment_start = start
-        segment_end = end
-        y, sr = librosa.load(path, sr=sample_rate, offset=segment_start, duration=segment_end - segment_start, mono=True, dtype=np.float32)
-        return y
-
-
-    def segment_embedding(self,
-                          segment,
-                          path):
-        mfcc = self.sample_from_mfcc(self.read_segment_mfcc(path, segment ,SAMPLE_RATE),NUM_FRAMES)
-        return self.deep_speaker_model.m.predict(np.expand_dims(mfcc, axis=0))
-
     def predict(
         self,
-        file_string: str = Input(
-            description="Either provide: Base64 encoded audio file,",
-            default=None),
         file_url: str = Input(
             description="Or provide: A direct audio file URL", default=None),
-        file: Path = Input(description="Or an audio file", default=None),
-        group_segments: bool = Input(
-            description=
-            "Group segments of same speaker shorter apart than 2 seconds",
-            default=False),
-        num_speakers: int = Input(description="Number of speakers",
-                                  ge=1,
-                                  le=50,
-                                  default=11),
-        prompt: str = Input(description="Prompt, to be used as context",
-                            default="Some people speaking."),
-        offset_seconds: int = Input(
-            description="Offset in seconds, used for chunked inputs",
-            default=0,
-            ge=0)
+        language: str = Input(description="Language spoken in the audio, specify None to perform language detection",
+                            default="es"),
+        batch_size: int = Input(description="Batch size for batched inference",
+                            default=8)
     ) -> Output:
-        """Run a single prediction on the model"""
-        # Check if either filestring, filepath or file is provided, but only 1 of them
-        """ if sum([file_string is not None, file_url is not None, file is not None]) != 1:
-            raise RuntimeError("Provide either file_string, file or file_url") """
-
+        random_uuid = uuid.uuid4()
+        vocal_target  = f"temp-{random_uuid}.wav"
+        folder_outs = f"temp_{random_uuid}_outputs"
+    
         try:
-            # Generate a temporary filename
-            temp_wav_filename = f"temp-{time.time_ns()}.wav"
+            if file_url is not None:
+                self.download_audio_and_convert_to_wav(file_url,vocal_target)
+                return_code = os.system(
+                    f'python -m demucs.separate -n htdemucs --two-stems=vocals "{temp_wav_filename}" -o "{folder_outs}"'
+                )
+                if return_code == 0:
+                    vocal_target = os.path.join(
+                        folder_outs,
+                        "htdemucs",
+                        os.path.splitext(os.path.basename(args.audio))[0],
+                        "vocals.wav",
+                    )
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                print(device)
+                from transcription_helpers import transcribe_batched
+                whisper_results, language = transcribe_batched(
+                    vocal_target,
+                    language,
+                    batch_size,
+                    "large-v2",
+                    mtypes[device],
+                    False,
+                    device,
+                )
+                print("search "+str(language)+" in "+str(wav2vec2_langs))
+                if language in wav2vec2_langs:
+                    alignment_model, metadata = whisperx.load_align_model(
+                        language_code=language, device=args.device
+                    )
+                    result_aligned = whisperx.align(
+                        whisper_results, alignment_model, metadata, vocal_target, args.device
+                    )
+                    word_timestamps = filter_missing_timestamps(
+                        result_aligned["word_segments"],
+                        initial_timestamp=whisper_results[0].get("start"),
+                        final_timestamp=whisper_results[-1].get("end"),
+                    )
+                    # clear gpu vram
+                    del alignment_model
+                    torch.cuda.empty_cache()
+                else:
+                    assert (
+                        batch_size == 0  # TODO: add a better check for word timestamps existence
+                    ), (
+                        f"Unsupported language: {language}, use --batch_size to 0"
+                        " to generate word timestamps using whisper directly and fix this error."
+                    )
+                    word_timestamps = []
+                    for segment in whisper_results:
+                        for word in segment["words"]:
+                            word_timestamps.append({"word": word[2], "start": word[0], "end": word[1]})
+                
+                print(word_timestamps)
+                # convert audio to mono for NeMo combatibility
+                sound = AudioSegment.from_file(vocal_target).set_channels(1)
+                ROOT = os.getcwd()
+                temp_path = os.path.join(ROOT, "temp_outputs")
+                os.makedirs(temp_path, exist_ok=True)
+                sound.export(os.path.join(temp_path, "mono_file.wav"), format="wav")
+                # Initialize NeMo MSDD diarization model
+                msdd_model = NeuralDiarizer(cfg=create_config(temp_path)).to(args.device)
+                msdd_model.diarize()
+                del msdd_model
+                torch.cuda.empty_cache()
+                speaker_ts = []
+                with open(os.path.join(temp_path, "pred_rttms", "mono_file.rttm"), "r") as f:
+                    lines = f.readlines()
+                    for line in lines:
+                        line_list = line.split(" ")
+                        s = int(float(line_list[5]) * 1000)
+                        e = s + int(float(line_list[8]) * 1000)
+                        speaker_ts.append([s, e, int(line_list[11].split("_")[-1])])
+                wsm = get_words_speaker_mapping(word_timestamps, speaker_ts, "start")
+                if language in punct_model_langs:
+                    # restoring punctuation in the transcript to help realign the sentences
+                    punct_model = PunctuationModel(model="kredor/punctuate-all")
 
-            if file is not None:
-                subprocess.run([
-                    'ffmpeg', '-i', file, '-ar', '16000', '-ac', '1', '-c:a',
-                    'pcm_s16le', temp_wav_filename
-                ])
+                    words_list = list(map(lambda x: x["word"], wsm))
 
-            elif file_url is not None:
-                response = requests.get(file_url)
-                temp_audio_filename = f"temp-{time.time_ns()}.audio"
-                with open(temp_audio_filename, 'wb') as file:
-                    file.write(response.content)
+                    labled_words = punct_model.predict(words_list)
 
-                subprocess.run([
-                    'ffmpeg', '-i', temp_audio_filename, '-ar', '16000', '-ac',
-                    '1', '-c:a', 'pcm_s16le', temp_wav_filename
-                ])
+                    ending_puncts = ".?!"
+                    model_puncts = ".,;:!?"
 
-                if os.path.exists(temp_audio_filename):
-                    os.remove(temp_audio_filename)
-            elif file_string is not None:
-                audio_data = base64.b64decode(
-                    file_string.split(',')[1] if ',' in
-                    file_string else file_string)
-                temp_audio_filename = f"temp-{time.time_ns()}.audio"
-                with open(temp_audio_filename, 'wb') as f:
-                    f.write(audio_data)
+                    # We don't want to punctuate U.S.A. with a period. Right?
+                    is_acronym = lambda x: re.fullmatch(r"\b(?:[a-zA-Z]\.){2,}", x)
 
-                subprocess.run([
-                    'ffmpeg', '-i', temp_audio_filename, '-ar', '16000', '-ac',
-                    '1', '-c:a', 'pcm_s16le', temp_wav_filename
-                ])
-
-                if os.path.exists(temp_audio_filename):
-                    os.remove(temp_audio_filename)
-
-            segments = self.speech_to_text(temp_wav_filename, num_speakers,
-                                           prompt, offset_seconds,
-                                           group_segments)
-
-            print(f'done with inference')
-            # Return the results as a JSON object
-            return Output(segments=segments)
+                    for word_dict, labeled_tuple in zip(wsm, labled_words):
+                        word = word_dict["word"]
+                        if (
+                            word
+                            and labeled_tuple[1] in ending_puncts
+                            and (word[-1] not in model_puncts or is_acronym(word))
+                        ):
+                            word += labeled_tuple[1]
+                            if word.endswith(".."):
+                                word = word.rstrip(".")
+                            word_dict["word"] = word
+                else:
+                    logging.warning(
+                            f"Punctuation restoration is not available for {language} language. Using the original punctuation.")
+                   
+                wsm = get_realigned_ws_mapping_with_punctuation(wsm)
+                ssm = get_sentences_speaker_mapping(wsm, speaker_ts)
+                return Output(segments=ssm)
 
         except Exception as e:
             raise RuntimeError("Error Running inference with local model", e)
-
+                
         finally:
             # Clean up
-            if os.path.exists(temp_wav_filename):
-                os.remove(temp_wav_filename)
-
-    def convert_time(self, secs, offset_seconds=0):
-        return datetime.timedelta(seconds=(round(secs) + offset_seconds))
-
-    def speech_to_text(self,
-                       audio_file_wav,
-                       num_speakers=10,
-                       prompt="People takling.",
-                       offset_seconds=0,
-                       group_segments=False):
-        time_start = time.time()
-
-        # Transcribe audio
-        print("Starting transcribing")
-        options = dict(vad_filter=True,
-                       initial_prompt=prompt,
-                       word_timestamps=True)
-        segments, _ = self.model.transcribe(audio_file_wav, **options)
-        segments = list(segments)
-        segments = [{
-            'start':
-            float(s.start + offset_seconds),
-            'end':
-            float(s.end + offset_seconds),
-            'text':
-            s.text,
-            'words': [{
-                'start': float(w.start + offset_seconds),
-                'end': float(w.end + offset_seconds),
-                'word': w.word
-            } for w in s.words]
-        } for s in segments]
-
-        time_transcribing_end = time.time()
-        print(
-            f"Finished with transcribing, took {time_transcribing_end - time_start:.5} seconds"
-        )
-        diarization = self.diarization_model(audio_file_wav,
-                                             num_speakers=num_speakers)
-
-        time_diraization_end = time.time()
-        print(
-            f"Finished with diarization, took {time_diraization_end - time_transcribing_end:.5} seconds"
-        )
-
-        # Initialize variables to keep track of the current position in both lists
-        margin = 0.1  # 0.1 seconds margin
-
-        # Initialize an empty list to hold the final segments with speaker info
-        final_segments = []
-
-        diarization_list = list(diarization.itertracks(yield_label=True))
-        speaker_idx = 0
-        n_speakers = len(diarization_list)
-
-        # Iterate over each segment
-        for segment in segments:
-            segment_start = segment['start'] + offset_seconds
-            segment_end = segment['end'] + offset_seconds
-            segment_text = []
-            segment_words = []
-
-            # Iterate over each word in the segment
-            for word in segment['words']:
-                word_start = word['start'] + offset_seconds - margin
-                word_end = word['end'] + offset_seconds + margin
-
-                while speaker_idx < n_speakers:
-                    turn, _, speaker = diarization_list[speaker_idx]
-
-                    if turn.start <= word_end and turn.end >= word_start:
-                        # Add word without modifications
-                        segment_text.append(word['word'])
-                        
-                        # Strip here for individual word storage
-                        word['word'] = word['word'].strip()
-                        segment_words.append(word)
-
-                        if turn.end <= word_end:
-                            speaker_idx += 1
-
-                        break
-                    elif turn.end < word_start:
-                        speaker_idx += 1
-                    else:
-                        break
-
-            if segment_text:
-                combined_text = ''.join(segment_text)
-                cleaned_text = re.sub('  ', ' ', combined_text).strip()
-                new_segment = {
-                    'start': segment_start - offset_seconds,
-                    'end': segment_end - offset_seconds,
-                    'speaker': speaker,
-                    'text': cleaned_text,
-                    'words': segment_words
-                }
-                final_segments.append(new_segment)
-
-        time_merging_end = time.time()
-        print(
-            f"Finished with merging, took {time_merging_end - time_diraization_end:.5} seconds"
-        )
-        segments = final_segments
-        # Make output
-        output = []  # Initialize an empty list for the output
-
-        self.deep_speaker_model = DeepSpeakerModel()      
-        self.deep_speaker_model.m.load_weights('ResCNN_triplet_training_checkpoint_265.h5', by_name=True)
-        
-        for i in range(0, len(segments)):
-            current_group = {
-                'start': str(segments[i]["start"]),
-                'end': str(segments[i]["end"]),
-                'speaker': segments[i]["speaker"],
-                'text': segments[i]["text"],
-                'words': segments[i]["words"],
-                'embeddingSpeaker':[]
-            }
-            embedding_speaker = self.segment_embedding(current_group,audio_file_wav)
-            current_group["embeddingSpeaker"] = embedding_speaker
-            output.append(current_group)
-
-        time_cleaning_end = time.time()
-        print(
-            f"Finished with cleaning, took {time_cleaning_end - time_merging_end:.5} seconds"
-        )
-        time_end = time.time()
-        time_diff = time_end - time_start
-
-        system_info = f"""Processing time: {time_diff:.5} seconds"""
-        print(system_info)
-        return output
+            if os.path.exists(vocal_target):
+                os.remove(vocal_target)
+    
+    def download_audio_and_convert_to_wav(self, file_url, temp_wav_filename):
+        response = requests.get(file_url)
+        temp_audio_filename = f"temp-{time.time_ns()}.audio"
+        with open(temp_audio_filename, 'wb') as file:
+            file.write(response.content)
+        subprocess.run([
+            'ffmpeg', '-i', temp_audio_filename, '-ar', '16000', '-ac',
+            '1', '-c:a', 'pcm_s16le', temp_wav_filename
+        ])
+        if os.path.exists(temp_audio_filename):
+            os.remove(temp_audio_filename)
