@@ -17,7 +17,6 @@ build:
 
   # a list of packages in the format <package-name>==<version>
   python_packages:
-    - "git+https://github.com/thomasmol/faster-whisper.git@master"
     - "accelerate==0.15.0"
     - "ffmpeg-python==0.2.0"
     - "pandas==1.5.0"
@@ -53,7 +52,7 @@ build:
     - "wget"
     - "nemo_toolkit[asr]==1.21.0"
     - "transformers>=4.26.1"
-    - "git+https://github.com/m-bain/whisperX.git@a5dca2cc65b1a37f32a347e574b2c56af3a7434a"
+    - "git+https://github.com/m-bain/whisperX.git@d6562c26da467ca49866a4173c0e723f3837f367"
     - "git+https://github.com/facebookresearch/demucs#egg=demucs"
     - "deepmultilingualpunctuation"
 
