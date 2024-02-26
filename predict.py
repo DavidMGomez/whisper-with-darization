@@ -55,7 +55,7 @@ class Predictor(BasePredictor):
                     vocal_target = os.path.join(
                         folder_outs,
                         "htdemucs",
-                        os.path.splitext(os.path.basename(args.audio))[0],
+                        os.path.splitext(os.path.basename(vocal_target))[0],
                         "vocals.wav",
                     )
                 device = "cuda" if torch.cuda.is_available() else "cpu"
