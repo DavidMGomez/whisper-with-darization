@@ -14,13 +14,9 @@ from helpers import *
 from pydub import AudioSegment
 from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 from deepmultilingualpunctuation import PunctuationModel
-
 from cog import BasePredictor, BaseModel, Input, File, Path
 import numpy as np
-from deep_speaker.audio import read_mfcc,mfcc_fbank
-from deep_speaker.batcher import pad_mfcc
 from random import choice
-from deep_speaker.constants import SAMPLE_RATE, NUM_FRAMES
 
 mtypes = {"cpu": "int8", "cuda": "float16"}
 
