@@ -164,13 +164,13 @@ class Predictor(BasePredictor):
     
     def download_audio_and_convert_to_wav(self, file_url, temp_wav_filename):
         response = requests.get(file_url)
-        temp_audio_filename = f"temp-{time.time_ns()}.audio"
+        temp_audio_filename = f"temp-{time.time_ns()}.mp4"
         with open(temp_audio_filename, 'wb') as file:
             file.write(response.content)
-        subprocess.run([
-            'ffmpeg', '-i', temp_audio_filename, '-ar', '16000', '-ac',
-            '1', '-c:a', 'pcm_s16le', temp_wav_filename
-        ])
+        command_ffmpeg = f'ffmpeg -i {temp_audio_filename} -ar 16000 -ac 1 -c:a pcm_s16le {temp_wav_filename}'
+        print(command_ffmpeg)
+        return_code = os.system(command_ffmpeg)
+        print(return_code)
         if os.path.exists(temp_audio_filename):
             print(os.listdir("./"))
             print("removing "+temp_audio_filename)
