@@ -49,7 +49,7 @@ class Predictor(BasePredictor):
             if file_url is not None:
                 self.download_audio_and_convert_to_wav(file_url,vocal_target)
                 return_code = os.system(
-                    f'python -m demucs.separate -n htdemucs --two-stems=vocals "{temp_wav_filename}" -o "{folder_outs}"'
+                    f'python -m demucs.separate -n htdemucs --two-stems=vocals "{vocal_target}" -o "{folder_outs}"'
                 )
                 if return_code == 0:
                     vocal_target = os.path.join(
@@ -75,7 +75,7 @@ class Predictor(BasePredictor):
                         language_code=language, device=args.device
                     )
                     result_aligned = whisperx.align(
-                        whisper_results, alignment_model, metadata, vocal_target, args.device
+                        whisper_results, alignment_model, metadata, vocal_target, device
                     )
                     word_timestamps = filter_missing_timestamps(
                         result_aligned["word_segments"],
