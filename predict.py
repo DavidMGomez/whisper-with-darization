@@ -72,7 +72,7 @@ class Predictor(BasePredictor):
                 print("search "+str(language)+" in "+str(wav2vec2_langs))
                 if language in wav2vec2_langs:
                     alignment_model, metadata = whisperx.load_align_model(
-                        language_code=language, device=args.device
+                        language_code=language, device=device
                     )
                     result_aligned = whisperx.align(
                         whisper_results, alignment_model, metadata, vocal_target, device
