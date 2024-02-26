@@ -1,20 +1,12 @@
 # Prediction interface for Cog ⚙️
 from typing import Any, List
-import base64
-import contextlib
-import datetime
-import json
-import magic
-import mimetypes
 import numpy as np
 import subprocess
-import io
 import os
 import pandas as pd
 import requests
 import time
 import torch
-import wave
 import re
 import whisperx
 import uuid
@@ -24,21 +16,11 @@ from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 from deepmultilingualpunctuation import PunctuationModel
 
 from cog import BasePredictor, BaseModel, Input, File, Path
-from faster_whisper import WhisperModel
-from pyannote.audio import Pipeline
-from pyannote.audio import Audio
-from pyannote.core import Segment
-from pyannote.audio import Model
-from pyannote.audio import Inference
-import random
 import numpy as np
-import librosa 
 from deep_speaker.audio import read_mfcc,mfcc_fbank
 from deep_speaker.batcher import pad_mfcc
 from random import choice
 from deep_speaker.constants import SAMPLE_RATE, NUM_FRAMES
-from deep_speaker.conv_models import DeepSpeakerModel
-from deep_speaker.test import batch_cosine_similarity
 
 mtypes = {"cpu": "int8", "cuda": "float16"}
 
@@ -48,15 +30,7 @@ class Output(BaseModel):
 
 class Predictor(BasePredictor):
     def setup(self):
-        model_name = "large-v2"
-        self.model = WhisperModel(
-            model_name,
-            device="cuda" if torch.cuda.is_available() else "cpu")
-        self.diarization_model = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.0",
-            use_auth_token="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").to(
-                torch.device("cuda"))
-        # Define the model here.
+        pass
         
     def predict(
         self,
@@ -85,7 +59,6 @@ class Predictor(BasePredictor):
                         "vocals.wav",
                     )
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-                print(device)
                 from transcription_helpers import transcribe_batched
                 whisper_results, language = transcribe_batched(
                     vocal_target,
@@ -132,7 +105,7 @@ class Predictor(BasePredictor):
                 os.makedirs(temp_path, exist_ok=True)
                 sound.export(os.path.join(temp_path, "mono_file.wav"), format="wav")
                 # Initialize NeMo MSDD diarization model
-                msdd_model = NeuralDiarizer(cfg=create_config(temp_path)).to(args.device)
+                msdd_model = NeuralDiarizer(cfg=create_config(temp_path)).to(device)
                 msdd_model.diarize()
                 del msdd_model
                 torch.cuda.empty_cache()
