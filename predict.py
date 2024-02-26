@@ -42,15 +42,17 @@ class Predictor(BasePredictor):
                             default=8)
     ) -> Output:
         random_uuid = uuid.uuid4()
-        vocal_target  = f"./temp-{random_uuid}.wav"
+        vocal_target  = f"temp-{random_uuid}.wav"
         folder_outs = f"temp_{random_uuid}_outputs"
     
         try:
             if file_url is not None:
                 self.download_audio_and_convert_to_wav(file_url,vocal_target)
-                return_code = os.system(
-                    f'python -m demucs.separate -n htdemucs --two-stems=vocals "{vocal_target}" -o "{folder_outs}"'
-                )
+                command_demucs = f'python -m demucs.separate -n htdemucs --two-stems=vocals "./{vocal_target}" -o "{folder_outs}"'
+                print("Separando voces ")
+                print(command_demucs)
+                return_code = os.system(command_demucs)
+                print(os.listdir("./"+folder_outs))
                 if return_code == 0:
                     vocal_target = os.path.join(
                         folder_outs,
@@ -58,6 +60,7 @@ class Predictor(BasePredictor):
                         os.path.splitext(os.path.basename(vocal_target))[0],
                         "vocals.wav",
                     )
+                print(vocal_target)
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 from transcription_helpers import transcribe_batched
                 whisper_results, language = transcribe_batched(
@@ -169,5 +172,6 @@ class Predictor(BasePredictor):
             '1', '-c:a', 'pcm_s16le', temp_wav_filename
         ])
         if os.path.exists(temp_audio_filename):
+            print(os.listdir("./"))
             print("removing "+temp_audio_filename)
             os.remove(temp_audio_filename)
