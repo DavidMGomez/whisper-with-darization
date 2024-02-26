@@ -220,7 +220,7 @@ def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts):
     prev_spk = spk
 
     snts = []
-    snt = {"speaker": f"Speaker {spk}", "start": s, "end": e, "text": "","words":[]}
+    snt = {"speaker": f"Speaker {spk}", "start": s, "end": e, "text": "","words":[],"speaker_embedding":[]}
 
     for wrd_dict in word_speaker_mapping:
         wrd, spk = wrd_dict["word"], wrd_dict["speaker"]
