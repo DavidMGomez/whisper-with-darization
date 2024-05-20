@@ -214,26 +214,36 @@ def get_realigned_ws_mapping_with_punctuation(
     return realigned_list
 
 
-def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts):
+def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts,embeddings_info,embeddings_tensors):
     sentence_checker = nltk.tokenize.PunktSentenceTokenizer().text_contains_sentbreak
     s, e, spk = spk_ts[0]
+    s_embedding = int(embeddings_info[0]["offset"] * 1000)
+    e_embedding = int(embeddings_info[0]["offset"] +  embeddings_info[0]["duration"] * 1000)
+    embeding_tensor = embeddings_tensors[0].numpy()
+    embeding_index = 0
     prev_spk = spk
-
     snts = []
-    snt = {"speaker": f"Speaker {spk}", "start": s, "end": e, "text": "","words":[],"speaker_embedding":[]}
+    snt = {"speaker": f"Speaker {spk}", "start": s, "end": e, "text": "","words":[],"speaker_embedding":embeding_tensor}
 
     for wrd_dict in word_speaker_mapping:
         wrd, spk = wrd_dict["word"], wrd_dict["speaker"]
         s, e = wrd_dict["start_time"], wrd_dict["end_time"]
+        
         if spk != prev_spk or sentence_checker(snt["text"] + " " + wrd):
             snts.append(snt)
+            
+            while s_embedding < e :
+                embeding_index +=1 
+                s_embedding = int(embeddings_info[embeding_index]["offset"] * 1000)
+                embeding_tensor = embeddings_tensors[embeding_index].numpy().tolist()
+            
             snt = {
                 "speaker": f"Speaker {spk}",
                 "start": s,
                 "end": e,
                 "words":[],
                 "text": "",
-                "speaker_embedding":[]
+                "speaker_embedding": embeding_tensor
             }
         else:
             snt["end"] = e

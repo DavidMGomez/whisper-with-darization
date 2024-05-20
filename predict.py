@@ -44,7 +44,7 @@ class Predictor(BasePredictor):
         try:
             if file_url is not None:
                 self.download_audio_and_convert_to_wav(file_url,vocal_target)
-                command_demucs = f'python -m demucs.separate -n htdemucs --two-stems=vocals "./{vocal_target}" -o "{folder_outs}"'
+                command_demucs = f'python3 -m demucs.separate -n htdemucs --two-stems=vocals "./{vocal_target}" -o "{folder_outs}"'
                 print("Separando voces ")
                 print(command_demucs)
                 return_code = os.system(command_demucs)
@@ -100,7 +100,7 @@ class Predictor(BasePredictor):
                 # convert audio to mono for NeMo combatibility
                 sound = AudioSegment.from_file(vocal_target).set_channels(1)
                 ROOT = os.getcwd()
-                temp_path = os.path.join(ROOT, "temp_outputs")
+                temp_path = os.path.join(ROOT, "temp_outputs"+random_uuid)
                 os.makedirs(temp_path, exist_ok=True)
                 sound.export(os.path.join(temp_path, "mono_file.wav"), format="wav")
                 # Initialize NeMo MSDD diarization model
@@ -116,6 +116,22 @@ class Predictor(BasePredictor):
                         s = int(float(line_list[5]) * 1000)
                         e = s + int(float(line_list[8]) * 1000)
                         speaker_ts.append([s, e, int(line_list[11].split("_")[-1])])
+                
+                embeddings_info = []
+                embeddings_tensors = []
+                
+                with open(os.path.join(temp_path, "speaker_outputs", "subsegments_scale0.json"), "r") as f:
+                    lines = f.readlines()
+                    for line in lines:
+                        jsonLine = json.loads(line)
+                        embeddings_info.append(jsonLine)
+                        
+                with open(os.path.join(temp_path, "speaker_outputs","embeddings", "subsegments_scale0_embeddings.pkl"), "rb") as f:
+                    embeddings = pickle.load(f)
+                    tensor_embedding = embeddings["mono_file"]
+                    for t in tensor_embedding:
+                        embeddings_tensors.append(t)
+                    
                 wsm = get_words_speaker_mapping(word_timestamps, speaker_ts, "start")
                 if language in punct_model_langs:
                     # restoring punctuation in the transcript to help realign the sentences
@@ -147,7 +163,7 @@ class Predictor(BasePredictor):
                             f"Punctuation restoration is not available for {language} language. Using the original punctuation.")
                    
                 wsm = get_realigned_ws_mapping_with_punctuation(wsm)
-                ssm = get_sentences_speaker_mapping(wsm, speaker_ts)
+                ssm = get_sentences_speaker_mapping(wsm, speaker_ts,embeddings_info,embeddings_tensors)
                 return Output(segments=ssm)
 
         except Exception as e:
@@ -157,7 +173,7 @@ class Predictor(BasePredictor):
             # Clean up
             if os.path.exists(vocal_target):
                 os.remove(vocal_target)
-    
+
     def download_audio_and_convert_to_wav(self, file_url, temp_wav_filename):
         response = requests.get(file_url)
         temp_audio_filename = f"temp-{time.time_ns()}.mp4"
