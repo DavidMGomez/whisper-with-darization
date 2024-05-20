@@ -1,4 +1,5 @@
 # Prediction interface for Cog ⚙️
+import pickle
 from typing import Any, List
 import numpy as np
 import subprocess
