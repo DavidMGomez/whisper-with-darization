@@ -100,7 +100,7 @@ class Predictor(BasePredictor):
                 # convert audio to mono for NeMo combatibility
                 sound = AudioSegment.from_file(vocal_target).set_channels(1)
                 ROOT = os.getcwd()
-                temp_path = os.path.join(ROOT, "temp_outputs"+random_uuid)
+                temp_path = os.path.join(ROOT, f"temp_outputs{random_uuid}")
                 os.makedirs(temp_path, exist_ok=True)
                 sound.export(os.path.join(temp_path, "mono_file.wav"), format="wav")
                 # Initialize NeMo MSDD diarization model
