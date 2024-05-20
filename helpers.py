@@ -223,7 +223,7 @@ def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts,embeddings_info,e
     embeding_index = 0
     prev_spk = spk
     snts = []
-    snt = {"speaker": f"Speaker {spk}", "start": s, "end": e, "text": "","words":[],"speaker_embedding":embeding_tensor}
+    snt = {"speaker": f"Speaker {spk}", "start": s, "end": e, "text": "","words":[],"speaker_embedding":embeding_tensor,  "embedding_s": s_embedding,"emdegging_e": e_embedding}
 
     for wrd_dict in word_speaker_mapping:
         wrd, spk = wrd_dict["word"], wrd_dict["speaker"]
@@ -232,10 +232,10 @@ def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts,embeddings_info,e
         if spk != prev_spk or sentence_checker(snt["text"] + " " + wrd):
             snts.append(snt)
             
-            while s_embedding < e and embeding_index < len(embeddings_info):
+            while s_embedding < e and embeding_index < len(embeddings_info)-1:
                 embeding_index +=1 
                 s_embedding = int(embeddings_info[embeding_index]["offset"] * 1000)
-                e_embedding = int(embeddings_info[0]["offset"] +  embeddings_info[0]["duration"] * 1000)
+                e_embedding = int(embeddings_info[embeding_index]["offset"] +  embeddings_info[0]["duration"] * 1000)
                 embeding_tensor = embeddings_tensors[embeding_index].numpy().tolist()
                 
             snt = {
