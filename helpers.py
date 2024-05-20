@@ -213,17 +213,20 @@ def get_realigned_ws_mapping_with_punctuation(
 
     return realigned_list
 
+def get_embedding_in_middle(embedding_info,embedding_tensors,snt):
+    for i,embedding in enumerate(embedding_info):
+        s_embedding = int(embedding["offset"] * 1000)
+        e_embedding = int(embedding["offset"] +  embedding["duration"] * 1000)
+        if(s_embedding >= snt["start"] and e_embedding <= snt["end"] ):
+            return embedding_tensors[i].numpy().tolist()
+    return []
 
 def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts,embeddings_info,embeddings_tensors):
     sentence_checker = nltk.tokenize.PunktSentenceTokenizer().text_contains_sentbreak
     s, e, spk = spk_ts[0]
-    s_embedding = int(embeddings_info[0]["offset"] * 1000)
-    e_embedding = int(embeddings_info[0]["offset"] +  embeddings_info[0]["duration"] * 1000)
-    embeding_tensor = embeddings_tensors[0].numpy()
-    embeding_index = 0
     prev_spk = spk
     snts = []
-    snt = {"speaker": f"Speaker {spk}", "start": s, "end": e, "text": "","words":[],"speaker_embedding":embeding_tensor,  "embedding_s": s_embedding,"emdegging_e": e_embedding}
+    snt = {"speaker": f"Speaker {spk}", "start": s, "end": e, "text": "","words":[],"speaker_embedding":[]}
 
     for wrd_dict in word_speaker_mapping:
         wrd, spk = wrd_dict["word"], wrd_dict["speaker"]
@@ -232,29 +235,24 @@ def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts,embeddings_info,e
         if spk != prev_spk or sentence_checker(snt["text"] + " " + wrd):
             snts.append(snt)
             
-            while s_embedding < e and embeding_index < len(embeddings_info)-1:
-                embeding_index +=1 
-                s_embedding = int(embeddings_info[embeding_index]["offset"] * 1000)
-                e_embedding = int(embeddings_info[embeding_index]["offset"] +  embeddings_info[0]["duration"] * 1000)
-                embeding_tensor = embeddings_tensors[embeding_index].numpy().tolist()
-                
             snt = {
                 "speaker": f"Speaker {spk}",
                 "start": s,
                 "end": e,
                 "words":[],
                 "text": "",
-                "speaker_embedding": embeding_tensor,
-                "embedding_s": s_embedding,
-                "emdegging_e": e_embedding
+                "speaker_embedding": []
             }
         else:
             snt["end"] = e
         snt["text"] += wrd + " "
         snt["words"].append({"start":s,"end":e,"word":wrd})
         prev_spk = spk
-
     snts.append(snt)
+    
+    for snt in snts:
+        snt["speaker_embedding"] = get_embedding_in_middle(embeddings_info,embeddings_tensors,snt)
+        
     return snts
 
 
