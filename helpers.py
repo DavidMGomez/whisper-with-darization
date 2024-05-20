@@ -232,18 +232,21 @@ def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts,embeddings_info,e
         if spk != prev_spk or sentence_checker(snt["text"] + " " + wrd):
             snts.append(snt)
             
-            while s_embedding < e :
+            while s_embedding < e and embeding_index < len(embeddings_info):
                 embeding_index +=1 
                 s_embedding = int(embeddings_info[embeding_index]["offset"] * 1000)
+                e_embedding = int(embeddings_info[0]["offset"] +  embeddings_info[0]["duration"] * 1000)
                 embeding_tensor = embeddings_tensors[embeding_index].numpy().tolist()
-            
+                
             snt = {
                 "speaker": f"Speaker {spk}",
                 "start": s,
                 "end": e,
                 "words":[],
                 "text": "",
-                "speaker_embedding": embeding_tensor
+                "speaker_embedding": embeding_tensor,
+                "embedding_s": s_embedding,
+                "emdegging_e": e_embedding
             }
         else:
             snt["end"] = e
