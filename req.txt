@@ -32,3 +32,4 @@ tensorflow
 Keras>=2.3.1
 numpy>=1.18.2
 numba>=0.48
+google-cloud-pubsub

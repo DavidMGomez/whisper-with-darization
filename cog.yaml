@@ -50,6 +50,7 @@ build:
     - "git+https://github.com/m-bain/whisperX.git"
     - "git+https://github.com/facebookresearch/demucs#egg=demucs"
     - "deepmultilingualpunctuation"
+    - "google-cloud-pubsub"
 
 
   # commands run after the environment is setup

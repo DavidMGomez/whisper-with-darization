@@ -18,11 +18,23 @@ from deepmultilingualpunctuation import PunctuationModel
 from cog import BasePredictor, BaseModel, Input, File, Path
 import numpy as np
 from random import choice
+from google.cloud import pubsub_v1
+from google.oauth2 import service_account
 
 mtypes = {"cpu": "int8", "cuda": "float16"}
 
 class Output(BaseModel):
     segments: list
+
+def send_pubsub_message(project_id, topic_id, message, credentials):
+    try:
+        credentials = service_account.Credentials.from_service_account_info(json.loads(credentials))
+        publisher = pubsub_v1.PublisherClient(credentials=credentials)
+        topic_path = publisher.topic_path(project_id, topic_id)
+        future = publisher.publish(topic_path, message.encode('utf-8'))
+        future.result()  # Verifica que el mensaje se haya publicado correctamente
+    except Exception as e:
+        print(f"Failed to send message to Pub/Sub: {e}")
 
 
 class Predictor(BasePredictor):
@@ -36,7 +48,11 @@ class Predictor(BasePredictor):
         language: str = Input(description="Language spoken in the audio, specify None to perform language detection",
                             default="es"),
         batch_size: int = Input(description="Batch size for batched inference",
-                            default=8)
+                            default=8),
+        multimedia_id: str = Input(description="MultimediaId", default=None),
+        project_id: str = Input(description="GCP Project ID for Pub/Sub", default=None),
+        topic_id: str = Input(description="Pub/Sub Topic ID", default=None),
+        credentials: str = Input(description="GCP Service Account Credentials (JSON)", default=None)
     ) -> Output:
         random_uuid = uuid.uuid4()
         vocal_target  = f"temp-{random_uuid}.wav"
@@ -165,11 +181,16 @@ class Predictor(BasePredictor):
                    
                 wsm = get_realigned_ws_mapping_with_punctuation(wsm)
                 ssm = get_sentences_speaker_mapping(wsm, speaker_ts,embeddings_info,embeddings_tensors)
+                # Enviar mensaje a Pub/Sub indicando éxito si las credenciales están presentes
+                if credentials and project_id and topic_id and multimedia_id:
+                    send_pubsub_message(project_id, topic_id, {"id": multimedia_id, "status": "success"}, credentials)
+                
                 return Output(segments=ssm)
 
         except Exception as e:
+            if credentials and project_id and topic_id and multimedia_id:
+                send_pubsub_message(project_id, topic_id, {"id": multimedia_id, "status": "failed", "error": str(e)}, credentials)
             raise RuntimeError("Error Running inference with local model", e)
-                
         finally:
             # Clean up
             if os.path.exists(vocal_target):
