@@ -18,6 +18,8 @@ build:
   # a list of packages in the format <package-name>==<version>
   python_packages:
     - "Cython"
+    - "numpy"
+    - "google-cloud-pubsub"
     - "torchtext==0.15.2"
     - "torchvision==0.15.2"
     - "sacremoses==0.0.53"
@@ -42,7 +44,6 @@ build:
     - "matplotlib>=3.2.1"
     - "tensorflow"
     - "Keras>=2.3.1"
-    - "numpy>=1.18.2"
     - "numba>=0.48"
     - "wget"
     - "nemo_toolkit[asr]==1.21.0"
@@ -50,7 +51,7 @@ build:
     - "git+https://github.com/m-bain/whisperX.git"
     - "git+https://github.com/facebookresearch/demucs#egg=demucs"
     - "deepmultilingualpunctuation"
-    - "google-cloud-pubsub"
+
 
 
   # commands run after the environment is setup
