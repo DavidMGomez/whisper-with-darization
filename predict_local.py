@@ -1,10 +1,8 @@
 # Prediction interface for Cog ⚙️
 import pickle
 from typing import Any, List
-import numpy as np
 import subprocess
 import os
-import pandas as pd
 import requests
 import time
 import torch
@@ -16,7 +14,6 @@ from pydub import AudioSegment
 from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 from deepmultilingualpunctuation import PunctuationModel
 from cog import BasePredictor, BaseModel, Input, File, Path
-import numpy as np
 from random import choice
 
 mtypes = {"cpu": "int8", "cuda": "float16"}
