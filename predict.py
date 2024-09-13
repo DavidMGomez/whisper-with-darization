@@ -20,21 +20,55 @@ import numpy as np
 from random import choice
 from google.cloud import pubsub_v1
 from google.oauth2 import service_account
+import json
+import base64
+import traceback
 
 mtypes = {"cpu": "int8", "cuda": "float16"}
 
 class Output(BaseModel):
     segments: list
 
-def send_pubsub_message(project_id, topic_id, message, credentials):
+def send_pubsub_message(project_id, topic_id, message_dict, credentials):
     try:
-        credentials = service_account.Credentials.from_service_account_info(json.loads(credentials))
-        publisher = pubsub_v1.PublisherClient(credentials=credentials)
+        # Decode the base64 encoded credentials
+        try:
+            decoded_credentials = base64.b64decode(credentials).decode('utf-8')
+        except Exception as e:
+            print("Error decoding credentials from base64:")
+            print(e)
+            traceback.print_exc()
+            raise
+
+        # Load the JSON credentials
+        try:
+            credentials_info = json.loads(decoded_credentials,strict=False)
+        except Exception as e:
+            print("Error loading JSON from decoded credentials:")
+            print(e)
+            traceback.print_exc()
+            raise
+
+        # Create credentials object
+        try:
+            credentials_obj = service_account.Credentials.from_service_account_info(credentials_info)
+        except Exception as e:
+            print("Error creating credentials object:")
+            print(e)
+            traceback.print_exc()
+            raise
+
+        # Create Pub/Sub publisher client
+        publisher = pubsub_v1.PublisherClient(credentials=credentials_obj)
         topic_path = publisher.topic_path(project_id, topic_id)
-        future = publisher.publish(topic_path, message.encode('utf-8'))
-        future.result()  # Verifica que el mensaje se haya publicado correctamente
+
+        # Publish the message
+        future = publisher.publish(topic_path, json.dumps(message_dict, indent=4).encode('utf-8'))
+        future.result()  # Verify that the message was published successfully
+
     except Exception as e:
         print(f"Failed to send message to Pub/Sub: {e}")
+        traceback.print_exc()
 
 
 class Predictor(BasePredictor):
@@ -52,7 +86,7 @@ class Predictor(BasePredictor):
         multimedia_id: str = Input(description="MultimediaId", default=None),
         project_id: str = Input(description="GCP Project ID for Pub/Sub", default=None),
         topic_id: str = Input(description="Pub/Sub Topic ID", default=None),
-        credentials: str = Input(description="GCP Service Account Credentials (JSON)", default=None)
+        credentials: str = Input(description="GCP Service Account Credentials ", default=None)
     ) -> Output:
         random_uuid = uuid.uuid4()
         vocal_target  = f"temp-{random_uuid}.wav"
