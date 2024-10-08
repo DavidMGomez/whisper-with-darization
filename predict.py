@@ -107,7 +107,6 @@ class Predictor(BasePredictor):
                         os.path.splitext(os.path.basename(vocal_target))[0],
                         "vocals.wav",
                     )
-                print(vocal_target)
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 from transcription_helpers import transcribe_batched
                 whisper_results, language = transcribe_batched(
@@ -119,7 +118,6 @@ class Predictor(BasePredictor):
                     False,
                     device,
                 )
-                print("search "+str(language)+" in "+str(wav2vec2_langs))
                 if language in wav2vec2_langs:
                     alignment_model, metadata = whisperx.load_align_model(
                         language_code=language, device=device
@@ -146,8 +144,6 @@ class Predictor(BasePredictor):
                     for segment in whisper_results:
                         for word in segment["words"]:
                             word_timestamps.append({"word": word[2], "start": word[0], "end": word[1]})
-                
-                print(word_timestamps)
                 # convert audio to mono for NeMo combatibility
                 sound = AudioSegment.from_file(vocal_target).set_channels(1)
                 ROOT = os.getcwd()
@@ -214,7 +210,7 @@ class Predictor(BasePredictor):
                             f"Punctuation restoration is not available for {language} language. Using the original punctuation.")
                    
                 wsm = get_realigned_ws_mapping_with_punctuation(wsm)
-                ssm = get_sentences_speaker_mapping(wsm, speaker_ts,embeddings_info,embeddings_tensors)
+                ssm = get_sentences_speaker_mapping(wsm, speaker_ts,embeddings_info,sound)
                 # Enviar mensaje a Pub/Sub indicando éxito si las credenciales están presentes
                 if credentials and project_id and topic_id and multimedia_id:
                     send_pubsub_message(project_id, topic_id, {"id": multimedia_id, "status": "success"}, credentials)

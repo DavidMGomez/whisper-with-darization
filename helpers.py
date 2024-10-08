@@ -7,6 +7,12 @@ import nltk
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
 import logging
 from whisperx.utils import LANGUAGES, TO_LANGUAGE_CODE
+from pydub import AudioSegment
+import torch
+from speechbrain.pretrained import EncoderClassifier
+import numpy as np
+# Cargar el modelo preentrenado de SpeechBrain
+classifier = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", savedir="tmp")
 
 punct_model_langs = [
     "en",
@@ -221,7 +227,13 @@ def get_embedding_in_middle(embedding_info,embedding_tensors,snt):
             return embedding_tensors[i].numpy().tolist()
     return []
 
-def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts,embeddings_info,embeddings_tensors):
+# Función para extraer el segmento de audio correspondiente
+def obtener_segmento(signal, sr, inicio, fin):
+    inicio_muestra = int(inicio * sr)  # Convertir segundos a muestras
+    fin_muestra = int(fin * sr)        # Convertir segundos a muestras
+    return signal[inicio_muestra:fin_muestra]
+
+def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts,sound):
     sentence_checker = nltk.tokenize.PunktSentenceTokenizer().text_contains_sentbreak
     s, e, spk = spk_ts[0]
     prev_spk = spk
@@ -249,9 +261,20 @@ def get_sentences_speaker_mapping(word_speaker_mapping, spk_ts,embeddings_info,e
         snt["words"].append({"start":s,"end":e,"word":wrd})
         prev_spk = spk
     snts.append(snt)
-    
+    # Obtener la tasa de muestreo
+    sr = sound.frame_rate
+
     for snt in snts:
-        snt["speaker_embedding"] = get_embedding_in_middle(embeddings_info,embeddings_tensors,snt)
+        segmento = obtener_segmento(sound, sr, snt["start"], snt["end"])
+        # Convertir el segmento a formato batch (batch_size=1, num_samples)
+        segmento_tensor = torch.unsqueeze(segmento, 0)  # Añadir dimensión de batch (1, num_samples)
+        # Calcular la longitud relativa del segmento (1.0 ya que es un segmento completo)
+        wav_lens = torch.tensor([1.0])
+        # Extraer embeddings del segmento
+        embeddings = classifier.encode_batch(segmento_tensor, wav_lens)
+        # Guardar embeddings
+        embeddings_np = embeddings.squeeze().detach().cpu().numpy()
+        snt["speaker_embedding"] = embeddings_np
         
     return snts
 
