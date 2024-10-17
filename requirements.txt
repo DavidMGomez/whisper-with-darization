@@ -6,4 +6,8 @@ ffmpeg-python
 pyannote.audio
 nltk
 google-cloud-pubsub
+pydub
+demucs
+speechbrain
+openai-whisper
 git+https://github.com/m-bain/whisperx.git

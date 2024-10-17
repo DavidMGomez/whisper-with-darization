@@ -70,7 +70,8 @@ def get_audio_segment(signal, start_time, end_time):
     return signal[int(start_time * 1000):int(end_time * 1000)]  # Convert seconds to milliseconds
 
 
-def get_sentences_speaker_mapping(sentences, audio):
+
+def get_sentences_speaker_mapping(transcription_base, sentences, audio):
     """
     Processes the list of words with speaker labels and groups them into sentences
     with speaker embeddings.
@@ -86,50 +87,8 @@ def get_sentences_speaker_mapping(sentences, audio):
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir="tmp_speechbrain"
     )
-    sentence_tokenizer = nltk.tokenize.PunktSentenceTokenizer()
-    first_segment = sentences[0]
-    start_time, end_time = first_segment["start_time"], first_segment["end_time"]
-    speaker = first_segment["speaker"]
-    prev_speaker = speaker
-    segments = []
-    segment = {
-        "speaker": f"Speaker {speaker}",
-        "start": start_time,
-        "end": end_time,
-        "text": "",
-        "words": [],
-        "speaker_embedding": []
-    }
-
-    for word_dict in sentences:
-        word, speaker = word_dict["word"], word_dict["speaker"]
-        start_time, end_time = word_dict["start_time"], word_dict["end_time"]
-        # Check for speaker change or sentence boundary
-        text_before = segment["text"]
-        text_after = segment["text"] + " " + word
-        sentences_before = sentence_tokenizer.tokenize(text_before)
-        sentences_after = sentence_tokenizer.tokenize(text_after)
-        is_sentence_break = len(sentences_after) > len(sentences_before)
-        if speaker != prev_speaker or is_sentence_break:
-            segments.append(segment)
-            segment = {
-                "speaker": f"Speaker {speaker}",
-                "start": start_time,
-                "end": end_time,
-                "text": "",
-                "words": [],
-                "speaker_embedding": []
-            }
-        else:
-            segment["end"] = end_time
-        segment["text"] += word + " "
-        segment["words"].append({"start": start_time, "end": end_time, "word": word})
-        prev_speaker = speaker
-
-    segments.append(segment)
-
     # Extract speaker embeddings
-    for segment in segments:
+    for segment in sentences:
         audio_segment = get_audio_segment(audio, segment["start"], segment["end"])
         # Convert audio segment to numpy array
         samples = np.array(audio_segment.get_array_of_samples()).astype(np.float32)
@@ -145,7 +104,7 @@ def get_sentences_speaker_mapping(sentences, audio):
         embeddings_np = embeddings.squeeze().detach().cpu().numpy()
         segment["speaker_embedding"] = embeddings_np.tolist()  # Convert to list for JSON serialization
 
-    return segments
+    return sentences
 
 
 class Predictor(BasePredictor):
@@ -179,7 +138,7 @@ class Predictor(BasePredictor):
             description="GCP Service Account Credentials", default=None
         ),
         hf_token: str = Input(
-            description="HuggingFace token", default=None
+            description="HuggingFace token", default="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"
         ),
         min_num_speakers: int = Input(
             description="Min number of speakers", default=None
@@ -192,11 +151,12 @@ class Predictor(BasePredictor):
             raise ValueError("ERROR: 'file_url' is required!")
 
         random_uuid = uuid.uuid4()
+        vocal_target  = f"temp-{random_uuid}.wav"
         temp_outputs_dir = f"temp_{random_uuid}_outputs"
 
         try:
             # Download and convert audio to WAV
-            vocal_target = self.download_audio_and_convert_to_wav(file_url)
+            vocal_target = self.download_audio_and_convert_to_wav(file_url,vocal_target)
 
             # Separate vocals using Demucs
             self.separate_vocals(vocal_target, temp_outputs_dir)
@@ -212,7 +172,7 @@ class Predictor(BasePredictor):
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
             # Transcribe using WhisperX
-            results = transcribe_batched(
+            segments,language = transcribe_batched(
                 vocal_target,
                 language,
                 batch_size,
@@ -224,17 +184,18 @@ class Predictor(BasePredictor):
             if language in wav2vec2_langs:
                 # 2. Align whisper output
                 model_a, metadata = whisperx.load_align_model(
-                    language_code=results["language"], device=device
+                    language_code=language, device=device
                 )
                 audio = whisperx.load_audio(vocal_target)
                 results = whisperx.align(
-                    results["segments"],
+                    segments,
                     model_a,
                     metadata,
                     audio,
                     device,
                     return_char_alignments=False
                 )
+                transcrition_base = results
                 # 3. Assign speaker labels
                 if hf_token:
                     diarize_model = whisperx.DiarizationPipeline(
@@ -249,21 +210,11 @@ class Predictor(BasePredictor):
                 del diarize_model
                 torch.cuda.empty_cache()
 
-                # Build words list
-                words = []
-                for segment in results["segments"]:
-                    for word in segment["words"]:
-                        words.append({
-                            'start_time': word['start'],
-                            'end_time': word['end'],
-                            'word': word['text'],
-                            'speaker': word['speaker']
-                        })
-                logging.info(f"Words: {words}")
+                logging.info(f"segments: {results}")
 
                 # Get sentences with speaker mapping
                 segments = get_sentences_speaker_mapping(
-                    words,
+                    results["segments"],
                     AudioSegment.from_file(vocal_target).set_channels(1)
                 )
 
@@ -304,7 +255,7 @@ class Predictor(BasePredictor):
             except Exception as cleanup_exception:
                 logging.warning(f"Error during cleanup: {cleanup_exception}")
 
-    def download_audio_and_convert_to_wav(self, file_url):
+    def download_audio_and_convert_to_wav(self, file_url,temp_wav_filename):
         """Downloads an audio file from the given URL and converts it to a WAV file."""
         try:
             response = requests.get(file_url)
@@ -312,14 +263,10 @@ class Predictor(BasePredictor):
         except requests.RequestException as e:
             logging.error(f"Failed to download file from URL: {e}")
             raise
-
+        
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_audio_file:
             temp_audio_filename = temp_audio_file.name
             temp_audio_file.write(response.content)
-
-        temp_wav_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-        temp_wav_filename = temp_wav_file.name
-        temp_wav_file.close()  # Close the file so ffmpeg can write to it
 
         command_ffmpeg = [
             'ffmpeg',
