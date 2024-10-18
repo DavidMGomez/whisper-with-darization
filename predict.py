@@ -5,7 +5,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import time
 import traceback
 import uuid
 from typing import List
@@ -22,6 +21,37 @@ from speechbrain.pretrained import EncoderClassifier
 from transcription_helpers import transcribe_batched
 from whisper.tokenizer import LANGUAGES, TO_LANGUAGE_CODE
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
+import argparse
+import logging
+import os
+import re
+import torchaudio
+from ctc_forced_aligner import (
+    generate_emissions,
+    get_alignments,
+    get_spans,
+    load_alignment_model,
+    postprocess_results,
+    preprocess_text,
+)
+from deepmultilingualpunctuation import PunctuationModel
+from nemo.collections.asr.models.msdd_models import NeuralDiarizer
+
+from helpers import (
+    cleanup,
+    create_config,
+    get_realigned_ws_mapping_with_punctuation,
+    get_sentences_speaker_mapping,
+    get_speaker_aware_transcript,
+    get_words_speaker_mapping,
+    langs_to_iso,
+    process_language_arg,
+    punct_model_langs,
+    whisper_langs,
+    write_srt,
+)
+from transcription_helpers import transcribe_batched
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -69,8 +99,6 @@ def get_audio_segment(signal, start_time, end_time):
     """Extracts a segment of the audio signal between start_time and end_time."""
     return signal[int(start_time * 1000):int(end_time * 1000)]  # Convert seconds to milliseconds
 
-
-
 def get_sentences_speaker_mapping(transcription_base, sentences, audio):
     """
     Processes the list of words with speaker labels and groups them into sentences
@@ -89,20 +117,23 @@ def get_sentences_speaker_mapping(transcription_base, sentences, audio):
     )
     # Extract speaker embeddings
     for segment in sentences:
-        audio_segment = get_audio_segment(audio, segment["start"], segment["end"])
-        # Convert audio segment to numpy array
-        samples = np.array(audio_segment.get_array_of_samples()).astype(np.float32)
-        # Normalize samples
-        max_abs_value = float(1 << (8 * audio_segment.sample_width - 1))
-        samples = samples / max_abs_value
-        # Convert to tensor
-        audio_tensor = torch.from_numpy(samples).unsqueeze(0)
-        # Compute embeddings
-        wav_lens = torch.tensor([1.0])
-        embeddings = classifier.encode_batch(audio_tensor, wav_lens)
-        # Save embeddings
-        embeddings_np = embeddings.squeeze().detach().cpu().numpy()
-        segment["speaker_embedding"] = embeddings_np.tolist()  # Convert to list for JSON serialization
+        try:
+            audio_segment = get_audio_segment(audio, segment["start"], segment["end"])
+            # Convert audio segment to numpy array
+            samples = np.array(audio_segment.get_array_of_samples()).astype(np.float32)
+            # Normalize samples
+            max_abs_value = float(1 << (8 * audio_segment.sample_width - 1))
+            samples = samples / max_abs_value
+            # Convert to tensor
+            audio_tensor = torch.from_numpy(samples).unsqueeze(0)
+            # Compute embeddings
+            wav_lens = torch.tensor([1.0])
+            embeddings = classifier.encode_batch(audio_tensor, wav_lens)
+            # Save embeddings
+            embeddings_np = embeddings.squeeze().detach().cpu().numpy()
+            segment["speaker_embedding"] = embeddings_np.tolist()  # Convert to list for JSON serialization
+        except:
+            pass
 
     return sentences
 
@@ -170,7 +201,7 @@ class Predictor(BasePredictor):
             )
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
-
+            
             # Transcribe using WhisperX
             segments,language = transcribe_batched(
                 vocal_target,

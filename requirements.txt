@@ -1,13 +1,12 @@
 --extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.1.0+cu121
-torchvision==0.16.0+cu121
-torchaudio==2.1.0+cu121
-ffmpeg-python
-pyannote.audio
-nltk
+wget
+nemo_toolkit[asr]==2.0.0rc0
+git+https://github.com/m-bain/whisperX.git@78dcfaab51005aa703ee21375f81ed31bc248560
+git+https://github.com/MahmoudAshraf97/demucs.git
+git+https://github.com/oliverguhr/deepmultilingualpunctuation.git
+git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
 google-cloud-pubsub
 pydub
 demucs
 speechbrain
 openai-whisper
-git+https://github.com/m-bain/whisperx.git
