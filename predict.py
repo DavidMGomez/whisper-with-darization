@@ -241,11 +241,11 @@ class Predictor(BasePredictor):
 
         except Exception as e:
             # Send failure message to Pub/Sub if credentials are provided
-            if credentials and project_id and topic_id and multimedia_id:
+            if credentials and project_id and topic_id and multimedia_part_id:
                 send_pubsub_message(
                     project_id,
                     topic_id,
-                    {"id": multimedia_id, "status": "failed", "error": str(e)},
+                    {"id": multimedia_part_id, "status": "failed", "error": str(e)},
                     credentials
                 )
             logging.error(f"Error running inference: {e}")
