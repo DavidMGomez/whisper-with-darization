@@ -22,6 +22,7 @@ from speechbrain.pretrained import EncoderClassifier
 from transcription_helpers import transcribe_batched
 from whisper.tokenizer import LANGUAGES, TO_LANGUAGE_CODE
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
+import gc
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +36,11 @@ wav2vec2_langs = list(DEFAULT_ALIGN_MODELS_TORCH.keys()) + list(DEFAULT_ALIGN_MO
 whisper_langs = sorted(LANGUAGES.keys()) + sorted([k.title() for k in TO_LANGUAGE_CODE.keys()])
 mtypes = {"cpu": "int8", "cuda": "float16"}
 
+
+
+compute_type = "float16"  # change to "int8" if low on GPU mem (may reduce accuracy)
+device = "cuda"
+whisper_arch = "./models/faster-whisper-large-v3"
 
 class Output(BaseModel):
     segments: List[dict]
@@ -71,7 +77,7 @@ def get_audio_segment(signal, start_time, end_time):
 
 
 
-def get_sentences_speaker_mapping(transcription_base, sentences, audio):
+def get_sentences_speaker_mapping( sentences, audio):
     """
     Processes the list of words with speaker labels and groups them into sentences
     with speaker embeddings.
@@ -89,21 +95,23 @@ def get_sentences_speaker_mapping(transcription_base, sentences, audio):
     )
     # Extract speaker embeddings
     for segment in sentences:
-        audio_segment = get_audio_segment(audio, segment["start"], segment["end"])
-        # Convert audio segment to numpy array
-        samples = np.array(audio_segment.get_array_of_samples()).astype(np.float32)
-        # Normalize samples
-        max_abs_value = float(1 << (8 * audio_segment.sample_width - 1))
-        samples = samples / max_abs_value
-        # Convert to tensor
-        audio_tensor = torch.from_numpy(samples).unsqueeze(0)
-        # Compute embeddings
-        wav_lens = torch.tensor([1.0])
-        embeddings = classifier.encode_batch(audio_tensor, wav_lens)
-        # Save embeddings
-        embeddings_np = embeddings.squeeze().detach().cpu().numpy()
-        segment["speaker_embedding"] = embeddings_np.tolist()  # Convert to list for JSON serialization
-
+        try:
+            audio_segment = get_audio_segment(audio, segment["start"], segment["end"])
+            # Convert audio segment to numpy array
+            samples = np.array(audio_segment.get_array_of_samples()).astype(np.float32)
+            # Normalize samples
+            max_abs_value = float(1 << (8 * audio_segment.sample_width - 1))
+            samples = samples / max_abs_value
+            # Convert to tensor
+            audio_tensor = torch.from_numpy(samples).unsqueeze(0)
+            # Compute embeddings
+            wav_lens = torch.tensor([1.0])
+            embeddings = classifier.encode_batch(audio_tensor, wav_lens)
+            # Save embeddings
+            embeddings_np = embeddings.squeeze().detach().cpu().numpy()
+            segment["speaker_embedding"] = embeddings_np.tolist()  # Convert to list for JSON serialization
+        except:
+            pass
     return sentences
 
 
@@ -111,6 +119,15 @@ class Predictor(BasePredictor):
     def setup(self):
         """Load necessary models and configurations."""
         nltk.download('punkt')
+        source_folder = './models/vad'
+        destination_folder = '../root/.cache/torch'
+        file_name = 'whisperx-vad-segmentation.bin'
+        os.makedirs(destination_folder, exist_ok=True)
+        source_file_path = os.path.join(source_folder, file_name)
+        if os.path.exists(source_file_path):
+            destination_file_path = os.path.join(destination_folder, file_name)
+            if not os.path.exists(destination_file_path):
+                shutil.copy(source_file_path, destination_folder)
 
     def predict(
         self,
@@ -125,8 +142,8 @@ class Predictor(BasePredictor):
             description="Batch size for batched inference",
             default=8
         ),
-        multimedia_id: str = Input(
-            description="Multimedia ID", default=None
+        multimedia_part_id: str = Input(
+            description="Multimedia part ID", default=None
         ),
         project_id: str = Input(
             description="GCP Project ID for Pub/Sub", default=None
@@ -171,59 +188,48 @@ class Predictor(BasePredictor):
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
-            # Transcribe using WhisperX
-            segments,language = transcribe_batched(
-                vocal_target,
-                language,
-                batch_size,
-                "large-v2",
-                mtypes[device],
-                device,
-            )
+            start_time = time.time_ns() / 1e6
+            
+            model = whisperx.load_model(whisper_arch, device, compute_type=compute_type, language=language,
+                                        asr_options={"temperatures": [0]}, vad_options={"vad_onset": 0.500,"vad_offset": 0.363})
+            
+            elapsed_time = time.time_ns() / 1e6 - start_time
+            print(f"Duration to load model: {elapsed_time:.2f} ms")
 
-            if language in wav2vec2_langs:
-                # 2. Align whisper output
-                model_a, metadata = whisperx.load_align_model(
-                    language_code=language, device=device
-                )
-                audio = whisperx.load_audio(vocal_target)
-                results = whisperx.align(
-                    segments,
-                    model_a,
-                    metadata,
-                    audio,
-                    device,
-                    return_char_alignments=False
-                )
-                transcrition_base = results
-                # 3. Assign speaker labels
-                if hf_token:
-                    diarize_model = whisperx.DiarizationPipeline(
-                        use_auth_token=hf_token, device=device
-                    )
-                else:
-                    diarize_model = whisperx.DiarizationPipeline(device=device)
-                # TODO: Add min/max number of speakers if known
-                diarize_segments = diarize_model(audio)
-                results = whisperx.assign_word_speakers(diarize_segments, results)
-                # Clear GPU VRAM
-                del diarize_model
-                torch.cuda.empty_cache()
+            start_time = time.time_ns() / 1e6
 
-                logging.info(f"segments: {results}")
+            audio = whisperx.load_audio(vocal_target)
 
+            elapsed_time = time.time_ns() / 1e6 - start_time
+            print(f"Duration to load audio: {elapsed_time:.2f} ms")
+
+          
+            start_time = time.time_ns() / 1e6
+            
+            result = model.transcribe(audio, batch_size=batch_size)
+            detected_language = result["language"]
+            print(f"language: {detected_language}")
+            elapsed_time = time.time_ns() / 1e6 - start_time
+            print(f"Duration to transcribe: {elapsed_time:.2f} ms")
+
+            gc.collect()
+            torch.cuda.empty_cache()
+            del model
+
+            if language in wav2vec2_langs:   
+                result = self.align(audio, result)
+                result = self.diarize(audio, result, hf_token, min_num_speakers, max_num_speakers)
                 # Get sentences with speaker mapping
                 segments = get_sentences_speaker_mapping(
-                    results["segments"],
+                    result["segments"],
                     AudioSegment.from_file(vocal_target).set_channels(1)
                 )
-
                 # Send success message to Pub/Sub if credentials are provided
-                if credentials and project_id and topic_id and multimedia_id:
+                if credentials and project_id and topic_id and multimedia_part_id:
                     send_pubsub_message(
                         project_id,
                         topic_id,
-                        {"id": multimedia_id, "status": "success"},
+                        {"id": multimedia_part_id, "status": "success"},
                         credentials
                     )
 
@@ -255,6 +261,37 @@ class Predictor(BasePredictor):
             except Exception as cleanup_exception:
                 logging.warning(f"Error during cleanup: {cleanup_exception}")
 
+    def diarize(self, audio, result, huggingface_access_token, min_speakers, max_speakers):
+        start_time = time.time_ns() / 1e6
+
+        diarize_model = whisperx.DiarizationPipeline(use_auth_token=huggingface_access_token, device=device)
+        diarize_segments = diarize_model(audio, min_speakers=min_speakers, max_speakers=max_speakers)
+
+        result = whisperx.assign_word_speakers(diarize_segments, result)
+
+      
+        elapsed_time = time.time_ns() / 1e6 - start_time
+        print(f"Duration to diarize segments: {elapsed_time:.2f} ms")
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        del diarize_model
+
+        return result
+
+    def align(self, audio, result):
+        start_time = time.time_ns() / 1e6
+
+        model_a, metadata = whisperx.load_align_model(language_code=result["language"], device=device)
+        result = whisperx.align(result["segments"], model_a, metadata, audio, device,return_char_alignments=False)
+        elapsed_time = time.time_ns() / 1e6 - start_time
+        print(f"Duration to align output: {elapsed_time:.2f} ms")
+        gc.collect()
+        torch.cuda.empty_cache()
+        del model_a
+
+        return result
+    
     def download_audio_and_convert_to_wav(self, file_url,temp_wav_filename):
         """Downloads an audio file from the given URL and converts it to a WAV file."""
         try:
