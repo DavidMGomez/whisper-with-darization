@@ -177,31 +177,31 @@ class Predictor(BasePredictor):
         max_num_speakers: int = Input(
             description="Max number of speakers", default=None
         ),
-        use_jev_confirmation: bool = Input(
+        use_speaker_confirmation: bool = Input(
             description="If true, ambiguous speaker-turn assignments (low diarization confidence "
                         "or a large time gap since the previous turn) are double-checked against "
-                        "conversational context using a confirmation_provider.",
+                        "conversational context using confirmation_provider.",
             default=False
         ),
         confirmation_provider: str = Input(
-            description="Which confirmation provider to use when use_jev_confirmation is true. "
+            description="Which confirmation provider to use when use_speaker_confirmation is true. "
                         "See confirmation.PROVIDERS for the registry of supported providers.",
             default="jev"
         ),
         jev_api_key: str = Input(
-            description="API key for the confirmation provider. Falls back to the JEV_API_KEY "
-                        "env var if not set.",
+            description="API key for the 'jev' confirmation provider (ignored for other "
+                        "providers). Falls back to the JEV_API_KEY env var if not set.",
             default=None
         ),
-        jev_confidence_threshold: float = Input(
+        confirmation_confidence_threshold: float = Input(
             description="Diarization segments with a speaker-confidence score below this "
-                        "(0-1) are sent for confirmation when use_jev_confirmation is true.",
+                        "(0-1) are sent for confirmation when use_speaker_confirmation is true.",
             default=0.55
         ),
-        jev_gap_threshold_seconds: float = Input(
+        confirmation_gap_threshold_seconds: float = Input(
             description="Segments preceded by a silence gap longer than this (seconds) are sent "
-                        "for confirmation when use_jev_confirmation is true, since a long pause "
-                        "makes a speaker change more likely.",
+                        "for confirmation when use_speaker_confirmation is true, since a long "
+                        "pause makes a speaker change more likely.",
             default=1.5
         )
     ) -> Output:
@@ -267,13 +267,16 @@ class Predictor(BasePredictor):
                     AudioSegment.from_file(vocal_target).set_channels(1)
                 )
 
-                if use_jev_confirmation:
-                    provider = confirmation.get_confirmation_provider(confirmation_provider, jev_api_key)
+                if use_speaker_confirmation:
+                    # jev_api_key only applies to the "jev" provider; a future provider would get
+                    # its own <provider>_api_key input wired in here the same way.
+                    provider_api_key = jev_api_key if confirmation_provider == "jev" else None
+                    provider = confirmation.get_confirmation_provider(confirmation_provider, provider_api_key)
                     segments = confirmation.annotate_and_confirm(
                         segments,
                         segment_confidences,
-                        confidence_threshold=jev_confidence_threshold,
-                        gap_threshold_seconds=jev_gap_threshold_seconds,
+                        confidence_threshold=confirmation_confidence_threshold,
+                        gap_threshold_seconds=confirmation_gap_threshold_seconds,
                         provider=provider,
                     )
 
