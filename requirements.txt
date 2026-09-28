@@ -1,13 +1,21 @@
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.1.0+cu121
-torchvision==0.16.0+cu121
-torchaudio==2.1.0+cu121
+# NOTE: nvidia/Nemotron-3-Diarization needs Python >=3.12 and a recent NeMo/torch
+# stack (see ASR_INTEGRATION_GUIDE.md on the model's HF page). That is newer than
+# the torch 2.1.0+cu121 this project was pinned to for pyannote/whisperx, and
+# python_version had to be bumped in cog.yaml too. Validate with `cog build`
+# before deploying -- some pins below may need adjusting once NeMo's resolver
+# picks a torch/cuda combination.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.4.0+cu124
+torchvision==0.19.0+cu124
+torchaudio==2.4.0+cu124
 ffmpeg-python
-pyannote.audio
 nltk
+requests
 google-cloud-pubsub
 pydub
 demucs
 speechbrain
+transformers
+nemo_toolkit[asr]
 openai-whisper
 git+https://github.com/m-bain/whisperx.git

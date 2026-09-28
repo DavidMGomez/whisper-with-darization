@@ -19,6 +19,8 @@ from google.cloud import pubsub_v1
 from google.oauth2 import service_account
 from pydub import AudioSegment
 from speechbrain.pretrained import EncoderClassifier
+import confirmation
+import nemotron_diarization
 from transcription_helpers import transcribe_batched
 from whisper.tokenizer import LANGUAGES, TO_LANGUAGE_CODE
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
@@ -155,13 +157,42 @@ class Predictor(BasePredictor):
             description="GCP Service Account Credentials", default=None
         ),
         hf_token: str = Input(
-            description="HuggingFace token", default="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"
+            description="Deprecated, unused since diarization no longer depends on a gated "
+                        "HuggingFace model. Kept only so existing callers that pass it don't break.",
+            default=None
         ),
         min_num_speakers: int = Input(
             description="Min number of speakers", default=None
         ),
         max_num_speakers: int = Input(
             description="Max number of speakers", default=None
+        ),
+        use_jev_confirmation: bool = Input(
+            description="If true, ambiguous speaker-turn assignments (low diarization confidence "
+                        "or a large time gap since the previous turn) are double-checked against "
+                        "conversational context using a confirmation_provider.",
+            default=False
+        ),
+        confirmation_provider: str = Input(
+            description="Which confirmation provider to use when use_jev_confirmation is true. "
+                        "See confirmation.PROVIDERS for the registry of supported providers.",
+            default="jev"
+        ),
+        jev_api_key: str = Input(
+            description="API key for the confirmation provider. Falls back to the JEV_API_KEY "
+                        "env var if not set.",
+            default=None
+        ),
+        jev_confidence_threshold: float = Input(
+            description="Diarization segments with a speaker-confidence score below this "
+                        "(0-1) are sent for confirmation when use_jev_confirmation is true.",
+            default=0.55
+        ),
+        jev_gap_threshold_seconds: float = Input(
+            description="Segments preceded by a silence gap longer than this (seconds) are sent "
+                        "for confirmation when use_jev_confirmation is true, since a long pause "
+                        "makes a speaker change more likely.",
+            default=1.5
         )
     ) -> Output:
         if file_url is None:
@@ -216,14 +247,25 @@ class Predictor(BasePredictor):
             torch.cuda.empty_cache()
             del model
 
-            if language in wav2vec2_langs:   
+            if language in wav2vec2_langs:
                 result = self.align(audio, result)
-                result = self.diarize(audio, result, hf_token, min_num_speakers, max_num_speakers)
+                result, segment_confidences = self.diarize(audio, result, max_num_speakers)
                 # Get sentences with speaker mapping
                 segments = get_sentences_speaker_mapping(
                     result["segments"],
                     AudioSegment.from_file(vocal_target).set_channels(1)
                 )
+
+                if use_jev_confirmation:
+                    provider = confirmation.get_confirmation_provider(confirmation_provider, jev_api_key)
+                    segments = confirmation.annotate_and_confirm(
+                        segments,
+                        segment_confidences,
+                        confidence_threshold=jev_confidence_threshold,
+                        gap_threshold_seconds=jev_gap_threshold_seconds,
+                        provider=provider,
+                    )
+
                 # Send success message to Pub/Sub if credentials are provided
                 if credentials and project_id and topic_id and multimedia_part_id:
                     send_pubsub_message(
@@ -261,23 +303,23 @@ class Predictor(BasePredictor):
             except Exception as cleanup_exception:
                 logging.warning(f"Error during cleanup: {cleanup_exception}")
 
-    def diarize(self, audio, result, huggingface_access_token, min_speakers, max_speakers):
+    def diarize(self, audio, result, max_speakers):
         start_time = time.time_ns() / 1e6
 
-        diarize_model = whisperx.DiarizationPipeline(use_auth_token=huggingface_access_token, device=device)
-        diarize_segments = diarize_model(audio, min_speakers=min_speakers, max_speakers=max_speakers)
-
+        max_num_speakers = max_speakers if max_speakers else 8
+        diarize_segments, segment_confidences = nemotron_diarization.diarize(
+            audio, max_num_speakers=max_num_speakers
+        )
         result = whisperx.assign_word_speakers(diarize_segments, result)
 
-      
         elapsed_time = time.time_ns() / 1e6 - start_time
         print(f"Duration to diarize segments: {elapsed_time:.2f} ms")
 
         gc.collect()
         torch.cuda.empty_cache()
-        del diarize_model
+        nemotron_diarization.unload()
 
-        return result
+        return result, segment_confidences
 
     def align(self, audio, result):
         start_time = time.time_ns() / 1e6

@@ -1,8 +1,13 @@
 build:
-  cuda: "12.1"
+  # Bumped from cuda 12.1 / python 3.11 (pyannote/whisperx pins) to satisfy
+  # nvidia/Nemotron-3-Diarization's NeMo/torch requirements. Validate with
+  # `cog build` -- this combination hasn't been confirmed against a real
+  # Replicate build yet.
+  cuda: "12.4"
   gpu: true
   system_packages:
     - "ffmpeg"
-  python_version: "3.11"
+    - "libsndfile1"
+  python_version: "3.12"
   python_requirements: requirements.txt
 predict: "predict.py:Predictor"
