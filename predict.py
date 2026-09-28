@@ -94,8 +94,16 @@ def get_sentences_speaker_mapping( sentences, audio):
     Returns:
         list: List of sentences with speaker embeddings.
     """
+    # Baked into the image at build time (see .github/workflows/main.yml's
+    # "Download speechbrain spkrec-ecapa-voxceleb model" step) rather than
+    # loaded from the HF Hub id at request time: Replicate's runtime network
+    # path to huggingface.co goes through an internal proxy that isn't fully
+    # reliable (hit a flaky "peer closed connection" mid-download here, the
+    # same class of failure already seen for Nemotron-3-Diarization's
+    # weights). A local directory `source` skips speechbrain's HF Hub fetch
+    # entirely.
     classifier = EncoderClassifier.from_hparams(
-        source="speechbrain/spkrec-ecapa-voxceleb",
+        source="./models/spkrec-ecapa-voxceleb",
         savedir="tmp_speechbrain"
     )
     # Extract speaker embeddings

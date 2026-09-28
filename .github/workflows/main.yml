@@ -78,6 +78,23 @@ jobs:
             wget -O "models/nemotron-3-diarization/$f" "https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/$f"
           done
 
+      - name: Download speechbrain spkrec-ecapa-voxceleb model
+        # get_sentences_speaker_mapping() in predict.py loads this by HF Hub
+        # id at request time via EncoderClassifier.from_hparams(), which hit
+        # the same class of flaky "peer closed connection" mid-download
+        # error already seen for Nemotron-3-Diarization's model.safetensors
+        # -- this time on embedding_model.ckpt through Replicate's internal
+        # HF proxy. speechbrain's fetch() treats a local directory `source`
+        # as already-fetched and skips HF Hub entirely, so baking these
+        # files in (predict.py now points source at
+        # "./models/spkrec-ecapa-voxceleb") removes the dependency the same
+        # way the Nemotron and Whisper models above already do.
+        run: |
+          mkdir -p models/spkrec-ecapa-voxceleb
+          for f in hyperparams.yaml embedding_model.ckpt mean_var_norm_emb.ckpt classifier.ckpt label_encoder.txt; do
+            wget -O "models/spkrec-ecapa-voxceleb/$f" "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/main/$f"
+          done
+
       - name: Restore Docker image cache
         # cog v0.8.0-beta3 has no remote-cache support of its own (no
         # --cache-from/--cache-to, confirmed in its source), so the only way
