@@ -9,7 +9,12 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # replicate/setup-cog@v1.0.2 installs its own fixed CUDA 12.1.0 toolkit
+    # (independent of this project's cog.yaml `cuda:` value) via
+    # Jimver/cuda-toolkit, whose installer fails to verify gcc on Ubuntu
+    # 24.04 ("Failed to verify gcc version"). Pinning 22.04 keeps an older,
+    # compatible gcc. This workflow had 0 successful runs before this fix.
+    runs-on: ubuntu-22.04
     steps:
       - name: Check out code
         uses: actions/checkout@v3
@@ -21,4 +26,4 @@ jobs:
 
       - name: Push to Replicate
         run: |
-          cog push r8.im/${{ inputs.model_name }}}
+          cog push r8.im/${{ inputs.model_name }}
