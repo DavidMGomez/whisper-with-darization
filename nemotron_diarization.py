@@ -61,9 +61,16 @@ def diarize(audio, max_num_speakers: int = 8):
         logits = model(**inputs).logits  # [1, num_frames, num_speaker_channels]
 
     probs = torch.sigmoid(logits)[0].cpu()  # [num_frames, num_speaker_channels]
-    speaker_segments = processor.extract_speaker_dict(logits)[0]  # [(speaker_idx, start, end), ...]
+    # extract_speaker_dict returns, per batch sample, a list of dicts like
+    # {"Start": 0.0, "End": 15.43, "Speaker": 0} -- not tuples. Confirmed
+    # against transformers' own processing_nemotron3_diarization.py /
+    # test_processing_nemotron3_diarization.py, since the model card's
+    # abbreviated usage snippet doesn't show this method at all.
+    speaker_segments = processor.extract_speaker_dict(logits, inputs.get("attention_mask"))[0]
 
-    frame_seconds = getattr(processor, "frame_duration_seconds", 0.01)
+    frame_seconds = (
+        processor.feature_extractor.hop_length / processor.feature_extractor.sampling_rate
+    )
     num_channels = probs.shape[-1]
     k = min(2, num_channels)
     top_values, _ = probs.topk(k, dim=-1)
@@ -74,7 +81,8 @@ def diarize(audio, max_num_speakers: int = 8):
 
     rows = []
     segment_confidences = []
-    for speaker_idx, start, end in speaker_segments:
+    for seg in speaker_segments:
+        speaker_idx, start, end = seg["Speaker"], seg["Start"], seg["End"]
         speaker_label = f"SPEAKER_{int(speaker_idx):02d}"
         rows.append({"start": float(start), "end": float(end), "speaker": speaker_label})
 

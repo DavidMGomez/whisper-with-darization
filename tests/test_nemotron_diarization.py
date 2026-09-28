@@ -3,16 +3,26 @@ import torch
 import nemotron_diarization
 
 
+class _FakeFeatureExtractor:
+    hop_length = 160
+    sampling_rate = 16000  # hop_length / sampling_rate = 0.01s per frame
+
+
 class _FakeProcessor:
-    frame_duration_seconds = 0.01
+    feature_extractor = _FakeFeatureExtractor()
 
     def __call__(self, audio, sampling_rate, return_tensors):
-        return {"input_values": torch.zeros(1, 1600)}
+        return {"input_features": torch.zeros(1, 1600), "attention_mask": torch.ones(1, 1600)}
 
-    def extract_speaker_dict(self, logits):
+    def extract_speaker_dict(self, logits, attention_mask=None):
         # Matches _fake_logits(): SPEAKER_00 for the first half-second,
-        # SPEAKER_01 for the second.
-        return [[(0, 0.0, 0.5), (1, 0.5, 1.0)]]
+        # SPEAKER_01 for the second. Real return shape per
+        # transformers' processing_nemotron3_diarization.py: a list (one
+        # per batch sample) of dicts with "Start"/"End"/"Speaker" keys.
+        return [[
+            {"Start": 0.0, "End": 0.5, "Speaker": 0},
+            {"Start": 0.5, "End": 1.0, "Speaker": 1},
+        ]]
 
 
 class _FakeOutput:
