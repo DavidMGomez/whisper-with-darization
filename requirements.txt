@@ -19,7 +19,10 @@ nltk
 requests
 google-cloud-pubsub
 pydub
-speechbrain
+# Pinned for the same reason as nemo_toolkit was: unpinned speechbrain let
+# pip backtrack all the way down to the 0.5.x line (years old), which pins
+# torch<=1.11, conflicting with our torch==2.4 pin.
+speechbrain==1.1.0
 transformers
 git+https://github.com/openai/whisper.git
 git+https://github.com/m-bain/whisperx.git
