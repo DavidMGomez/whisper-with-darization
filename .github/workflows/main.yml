@@ -41,5 +41,28 @@ jobs:
           REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
         run: echo "$REPLICATE_API_TOKEN" | cog login --token-stdin
 
+      - name: Download Whisper models
+        # build.sh does this, but it's meant to be run manually on a dev
+        # machine before `cog push` (Docker's build COPYs the checked-out
+        # repo dir as-is, models/ included) -- this workflow never ran it,
+        # so the pushed image had no model files at all, and
+        # faster-whisper's WhisperModel("./models/...") fell through to
+        # treating the local path as an (invalid) HuggingFace repo id.
+        # NOTE: build.sh's VAD download (get_vad_model_url.py) is skipped
+        # here -- it imports the now-removed `whisperx.vad` module (current
+        # whisperx HEAD moved VAD code to whisperx/vads/), so it's stale
+        # against the whisperx version we install. Not fixed here since
+        # it's a cold-start speed optimization, not a hard requirement:
+        # whisperx will just fetch the VAD model at runtime instead.
+        run: |
+          mkdir -p models/faster-whisper-large-v3
+          for f in config.json model.bin preprocessor_config.json tokenizer.json vocabulary.json; do
+            wget -O "models/faster-whisper-large-v3/$f" "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/$f"
+          done
+          mkdir -p models/faster-whisper-large-v3-turbo
+          for f in config.json model.bin preprocessor_config.json tokenizer.json vocabulary.json; do
+            wget -O "models/faster-whisper-large-v3-turbo/$f" "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/$f"
+          done
+
       - name: Push to Replicate
         run: cog push r8.im/${{ inputs.model_name }}
