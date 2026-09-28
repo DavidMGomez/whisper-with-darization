@@ -109,11 +109,21 @@ def get_sentences_speaker_mapping( sentences, audio):
     # path to huggingface.co goes through an internal proxy that isn't fully
     # reliable (hit a flaky "peer closed connection" mid-download here, the
     # same class of failure already seen for Nemotron-3-Diarization's
-    # weights). A local directory `source` skips speechbrain's HF Hub fetch
-    # entirely.
+    # weights).
+    #
+    # `source` alone isn't enough: it only controls where from_hparams()
+    # fetches hyperparams.yaml itself from. That YAML hardcodes its own
+    # `pretrained_path: speechbrain/spkrec-ecapa-voxceleb`, which is what
+    # the paths for embedding_model.ckpt/mean_var_norm_emb.ckpt/
+    # classifier.ckpt/label_encoder.txt actually interpolate from -- so
+    # without overriding it, the individual checkpoint fetches still hit
+    # the HF Hub id regardless of `source`. The override below points that
+    # variable at the same local directory so every fetch stays local.
+    LOCAL_SPKREC_PATH = "./models/spkrec-ecapa-voxceleb"
     classifier = EncoderClassifier.from_hparams(
-        source="./models/spkrec-ecapa-voxceleb",
-        savedir="tmp_speechbrain"
+        source=LOCAL_SPKREC_PATH,
+        savedir="tmp_speechbrain",
+        overrides={"pretrained_path": LOCAL_SPKREC_PATH},
     )
     # Extract speaker embeddings
     for segment in sentences:
