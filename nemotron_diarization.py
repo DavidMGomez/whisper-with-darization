@@ -106,3 +106,15 @@ def confidence_for_range(segment_confidences, start: float, end: float) -> float
             best_overlap = overlap
             best_confidence = seg["confidence"]
     return best_confidence
+
+
+def distinct_speakers_in_range(segment_confidences, start: float, end: float) -> set:
+    """Raw Nemotron speaker labels with any diarization activity overlapping
+    (start, end) -- e.g. a silence gap in the transcript. Used to tell a
+    clean two-party turn from a window where a third voice was picked up,
+    even briefly, before trusting a two-way speaker-identification guess."""
+    return {
+        seg["speaker"]
+        for seg in segment_confidences
+        if min(seg["end"], end) > max(seg["start"], start)
+    }

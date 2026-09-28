@@ -12,14 +12,20 @@ Two-tier design:
    just the same speaker continuing.
 
 2. Identification (choice, one request per case): only when the
-   continuity check says "no, that's a different speaker" do we ask the
-   more expensive "which of the known speakers is this" question, since we
-   now know a change happened but not who it changed to.
+   continuity check says "no, that's a different speaker" AND it's safe to
+   guess do we ask the more expensive "which of the known speakers is this"
+   question. "Safe" is deliberately narrow: the change has to be driven by
+   a real silence gap (the classic turn-taking cue, not just a low-confidence
+   segment), and nothing else may have been picked up during that gap --
+   a third voice active in it means this isn't a clean two-party switch, and
+   guessing among only the known speakers would be too error-prone. When
+   escalation isn't safe, we keep Nemotron's own raw guess rather than force
+   a risky multi-way classification.
 
 This mirrors real diarization-review workflow: assume continuity, escalate
-to identification only on an actual detected change. It also cuts request
-volume a lot compared to asking "who is this" for every single ambiguous
-segment.
+to identification only on an actual, low-risk detected change. It also cuts
+request volume a lot compared to asking "who is this" for every single
+ambiguous segment.
 """
 import abc
 import logging
@@ -248,12 +254,16 @@ def annotate_and_confirm(
 
     previous_end = None
     ambiguous = []
+    gap_triggered = []
+    gap_spans: List[Optional[tuple]] = []
     for seg in segments:
         confidence = nemotron_diarization.confidence_for_range(segment_confidences, seg["start"], seg["end"])
         seg["speaker_confidence"] = confidence
-        gap = (seg["start"] - previous_end) if previous_end is not None else 0.0
+        is_gap = previous_end is not None and (seg["start"] - previous_end) > gap_threshold_seconds
+        gap_spans.append((previous_end, seg["start"]) if is_gap else None)
+        gap_triggered.append(is_gap)
+        ambiguous.append(confidence < confidence_threshold or is_gap)
         previous_end = seg["end"]
-        ambiguous.append(confidence < confidence_threshold or gap > gap_threshold_seconds)
 
     if provider is None:
         return segments
@@ -264,6 +274,21 @@ def annotate_and_confirm(
     def push_context(text: str) -> None:
         context_texts.append(text)
         del context_texts[:-context_window]
+
+    def safe_to_identify(idx: int) -> bool:
+        """Only escalate to full multi-way identification for a gap-driven
+        change (a real silence, the classic turn-taking cue), and only if
+        nothing else was picked up during that gap -- a third voice active
+        in it means this isn't a clean two-party switch we can safely guess
+        between just the known speakers."""
+        if not gap_triggered[idx]:
+            return False
+        span = gap_spans[idx]
+        if span is None or span[0] is None:
+            return True
+        nearby = nemotron_diarization.distinct_speakers_in_range(segment_confidences, span[0], span[1])
+        extra = nearby - {established_speaker, segments[idx].get("speaker")}
+        return not extra
 
     i = 0
     n = len(segments)
@@ -279,6 +304,7 @@ def annotate_and_confirm(
         while i < n and ambiguous[i] and (i - run_start) < batch_size:
             i += 1
         run = segments[run_start:i]
+        run_indices = list(range(run_start, i))
 
         if not established_speaker or not context_texts:
             # No established speaker/context yet (e.g. the very first segment
@@ -289,7 +315,7 @@ def annotate_and_confirm(
             _identify_and_apply(seg, all_speakers, provider)
             established_speaker = seg.get("speaker", established_speaker)
             push_context(seg.get("text", ""))
-            run = run[1:]
+            run, run_indices = run[1:], run_indices[1:]
 
         if not run:
             continue
@@ -306,7 +332,7 @@ def annotate_and_confirm(
                 push_context(seg.get("text", ""))
             continue
 
-        for seg, result in zip(run, results):
+        for idx, seg, result in zip(run_indices, run, results):
             seg["jev_checked"] = True
             seg["jev_continuation_confidence"] = result.confidence
             if result.same_speaker:
@@ -315,12 +341,19 @@ def annotate_and_confirm(
                 else:
                     seg["speaker_confirmed_by"] = "jev_confirmed"
                 push_context(seg.get("text", ""))
-            else:
-                # A change was detected but not who it changed to -- escalate
-                # to identification, then re-anchor context from here so the
-                # rest of the run (if any) is compared against the right
-                # established speaker.
+            elif safe_to_identify(idx):
+                # A change was detected, it's a real gap, and nothing else
+                # was picked up in it -- safe enough to ask who it actually
+                # is, then re-anchor context from here.
                 _identify_and_apply(seg, all_speakers, provider)
+                established_speaker = seg.get("speaker", established_speaker)
+                context_texts = [seg.get("text", "")]
+            else:
+                # A change was detected but identifying who is too risky here
+                # (not a clean gap-driven switch, or another voice was picked
+                # up in the gap) -- keep Nemotron's own raw guess rather than
+                # force a multi-way guess, and anchor onward context on it.
+                seg["speaker_confirmed_by"] = "uncertain_not_escalated"
                 established_speaker = seg.get("speaker", established_speaker)
                 context_texts = [seg.get("text", "")]
 

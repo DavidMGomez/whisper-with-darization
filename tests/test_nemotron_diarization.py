@@ -67,3 +67,16 @@ def test_confidence_for_range_picks_the_most_overlapping_segment():
 
 def test_confidence_for_range_defaults_to_full_confidence_when_nothing_overlaps():
     assert nemotron_diarization.confidence_for_range([], 0.0, 1.0) == 1.0
+
+
+def test_distinct_speakers_in_range_only_counts_actual_overlap():
+    segment_confidences = [
+        {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "confidence": 0.9},
+        {"start": 5.0, "end": 5.4, "speaker": "SPEAKER_05", "confidence": 0.8},
+        {"start": 20.0, "end": 21.0, "speaker": "SPEAKER_01", "confidence": 0.9},
+    ]
+
+    # (1.0, 10.0) touches the first segment only at its boundary (no overlap)
+    # and fully contains the second -> only SPEAKER_05 counts.
+    assert nemotron_diarization.distinct_speakers_in_range(segment_confidences, 1.0, 10.0) == {"SPEAKER_05"}
+    assert nemotron_diarization.distinct_speakers_in_range(segment_confidences, 100.0, 101.0) == set()

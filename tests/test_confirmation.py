@@ -169,13 +169,77 @@ def test_annotate_and_confirm_batches_a_consecutive_ambiguous_run(monkeypatch):
     assert provider.continuation_calls == [["b", "c"]]  # b and c batched into one call
 
 
-def test_annotate_and_confirm_escalates_to_identification_on_detected_change(monkeypatch):
-    monkeypatch.setattr(nemotron_diarization, "confidence_for_range", lambda *a, **k: 0.1)
+def test_annotate_and_confirm_escalates_only_on_gap_driven_change_with_no_extra_speaker(monkeypatch):
+    fixed_confidences = {(0.0, 1.0): 0.9, (10.0, 11.0): 0.9, (11.1, 12.0): 0.9}
+    monkeypatch.setattr(
+        nemotron_diarization,
+        "confidence_for_range",
+        lambda segment_confidences, start, end: fixed_confidences[(start, end)],
+    )
+
+    segments = [
+        _segment(0.0, 1.0, "hola", speaker="SPEAKER_00"),  # high confidence, no gap -> establishes context
+        _segment(10.0, 11.0, "CHANGE now someone else talks", speaker="SPEAKER_00"),  # big gap after "hola" -> ambiguous
+        _segment(11.1, 12.0, "still the new person", speaker="SPEAKER_00"),  # small gap after that -> not ambiguous
+    ]
+    # No other speaker activity anywhere near the (1.0, 10.0) gap.
+    segment_confidences = [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "confidence": 0.9}]
+
+    provider = _RecordingProvider()
+    confirmation.annotate_and_confirm(
+        segments, segment_confidences, confidence_threshold=0.5, gap_threshold_seconds=1.5, provider=provider
+    )
+
+    # Gap-driven change, nothing else detected in the gap -> safe to escalate.
+    assert provider.identification_calls == ["CHANGE now someone else talks"]
+    assert segments[1]["speaker"] == "SPEAKER_99"
+    assert segments[1]["speaker_confirmed_by"] == "jev_override"
+    # Third segment wasn't ambiguous at all -- just trusted and used to advance context.
+    assert segments[2]["speaker"] == "SPEAKER_00"
+    assert "speaker_confirmed_by" not in segments[2]
+
+
+def test_annotate_and_confirm_does_not_escalate_when_extra_speaker_detected_in_gap(monkeypatch):
+    fixed_confidences = {(0.0, 1.0): 0.9, (10.0, 11.0): 0.9}
+    monkeypatch.setattr(
+        nemotron_diarization,
+        "confidence_for_range",
+        lambda segment_confidences, start, end: fixed_confidences[(start, end)],
+    )
 
     segments = [
         _segment(0.0, 1.0, "hola", speaker="SPEAKER_00"),
-        _segment(1.1, 2.0, "CHANGE now someone else talks", speaker="SPEAKER_00"),
-        _segment(2.1, 3.0, "still the new person", speaker="SPEAKER_00"),
+        _segment(10.0, 11.0, "CHANGE now someone else talks", speaker="SPEAKER_02"),
+    ]
+    # Nemotron's raw diarization picked up a third voice briefly inside the gap.
+    segment_confidences = [
+        {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "confidence": 0.9},
+        {"start": 5.0, "end": 5.4, "speaker": "SPEAKER_05", "confidence": 0.8},
+    ]
+
+    provider = _RecordingProvider()
+    confirmation.annotate_and_confirm(
+        segments, segment_confidences, confidence_threshold=0.5, gap_threshold_seconds=1.5, provider=provider
+    )
+
+    # A gap-driven change, but a third speaker was picked up in it -> too risky to
+    # guess between just the known speakers, so identification is never called.
+    assert provider.identification_calls == []
+    assert segments[1]["speaker"] == "SPEAKER_02"  # Nemotron's own raw guess, untouched
+    assert segments[1]["speaker_confirmed_by"] == "uncertain_not_escalated"
+
+
+def test_annotate_and_confirm_does_not_escalate_on_confidence_only_change(monkeypatch):
+    fixed_confidences = {(0.0, 1.0): 0.9, (1.1, 2.0): 0.1}
+    monkeypatch.setattr(
+        nemotron_diarization,
+        "confidence_for_range",
+        lambda segment_confidences, start, end: fixed_confidences[(start, end)],
+    )
+
+    segments = [
+        _segment(0.0, 1.0, "hola", speaker="SPEAKER_00"),
+        _segment(1.1, 2.0, "CHANGE now someone else talks", speaker="SPEAKER_02"),  # low conf, tiny gap
     ]
 
     provider = _RecordingProvider()
@@ -183,16 +247,12 @@ def test_annotate_and_confirm_escalates_to_identification_on_detected_change(mon
         segments, [], confidence_threshold=0.5, gap_threshold_seconds=1.5, provider=provider
     )
 
-    # First segment: no context yet -> identified directly -> SPEAKER_99, becomes established.
-    assert segments[0]["speaker"] == "SPEAKER_99"
-    # Second: continuation says CHANGE -> escalated to identification -> SPEAKER_99 again (stub).
-    assert provider.identification_calls == ["hola", "CHANGE now someone else talks"]
-    assert segments[1]["speaker"] == "SPEAKER_99"
-    assert segments[1]["speaker_confirmed_by"] == "jev_override"
-    # Third: continuation re-anchored on the newly established speaker (SPEAKER_99)
-    # confirms continuity, so it's relabeled too (Nemotron's original guess was SPEAKER_00).
-    assert segments[2]["speaker"] == "SPEAKER_99"
-    assert segments[2]["speaker_confirmed_by"] == "jev_override"
+    # Low-confidence-only ambiguity (no real gap) isn't a safe enough signal to
+    # justify a multi-way identification guess, even though continuity flagged
+    # a change -- keep Nemotron's own raw guess.
+    assert provider.identification_calls == []
+    assert segments[1]["speaker"] == "SPEAKER_02"
+    assert segments[1]["speaker_confirmed_by"] == "uncertain_not_escalated"
 
 
 def test_annotate_and_confirm_overrides_speaker_on_confirmed_continuation_mismatch(monkeypatch):
