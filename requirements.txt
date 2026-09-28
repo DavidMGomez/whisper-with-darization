@@ -21,7 +21,10 @@ nltk
 requests
 google-cloud-pubsub
 pydub
-demucs
+# demucs's PyPI sdist doesn't ship requirements_minimal.txt, which its own
+# setup.py reads at build time ("FileNotFoundError: ... requirements_minimal.txt").
+# Another pre-existing packaging break; GitHub HEAD has the file.
+git+https://github.com/facebookresearch/demucs.git
 speechbrain
 # Pinned: unpinned nemo_toolkit[asr] let pip's resolver backtrack all the way
 # down to the ancient 1.23.0 release (chasing a conflict against our other
