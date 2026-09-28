@@ -31,6 +31,10 @@ speechbrain==1.1.0
 # its custom Nemotron3DiarizationProcessor/NemotronAsrStreamingFeatureExtractor
 # classes aren't in any PyPI transformers release yet. Without this,
 # AutoProcessor.from_pretrained fails with "Unrecognized processing class".
+# Nemotron-3-Diarization's NemotronAsrStreamingFeatureExtractor needs
+# librosa for audio feature extraction ("NemotronAsrStreamingFeatureExtractor
+# requires the librosa library").
+librosa
 git+https://github.com/huggingface/transformers.git
 git+https://github.com/openai/whisper.git
 git+https://github.com/m-bain/whisperx.git
