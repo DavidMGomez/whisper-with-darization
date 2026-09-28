@@ -8,7 +8,7 @@ import tempfile
 import time
 import traceback
 import uuid
-from typing import List
+from typing import List, Optional
 import nltk
 import numpy as np
 import requests
@@ -49,10 +49,17 @@ WHISPER_MODEL_PATHS = {
 
 class Output(BaseModel):
     segments: List[dict]
+    pubsub_notified: Optional[bool] = None
 
 
-def send_pubsub_message(project_id, topic_id, message_dict, credentials):
-    """Sends a message to Google Pub/Sub."""
+def send_pubsub_message(project_id, topic_id, message_dict, credentials) -> bool:
+    """Sends a message to Google Pub/Sub. Returns whether it was actually delivered.
+
+    Never raises: a Pub/Sub outage must not fail the underlying prediction. But since
+    the caller's status ends up looking "successful" to Replicate either way, the
+    return value lets predict() surface real delivery status in Output instead of it
+    only living in a Replicate container log nobody's watching.
+    """
     try:
         # Decode the base64 encoded credentials
         decoded_credentials = base64.b64decode(credentials).decode('utf-8')
@@ -70,10 +77,12 @@ def send_pubsub_message(project_id, topic_id, message_dict, credentials):
         # Publish the message
         future = publisher.publish(topic_path, json.dumps(message_dict).encode('utf-8'))
         future.result()  # Verify that the message was published successfully
+        return True
 
     except Exception as e:
         logging.error(f"Failed to send message to Pub/Sub: {e}")
         traceback.print_exc()
+        return False
 
 
 def get_audio_segment(signal, start_time, end_time):
@@ -291,15 +300,16 @@ class Predictor(BasePredictor):
                     )
 
                 # Send success message to Pub/Sub if credentials are provided
+                pubsub_notified = None
                 if credentials and project_id and topic_id and multimedia_part_id:
-                    send_pubsub_message(
+                    pubsub_notified = send_pubsub_message(
                         project_id,
                         topic_id,
                         {"id": multimedia_part_id, "status": "success"},
                         credentials
                     )
 
-                return Output(segments=segments)
+                return Output(segments=segments, pubsub_notified=pubsub_notified)
 
             else:
                 # Handle case where language is not supported
