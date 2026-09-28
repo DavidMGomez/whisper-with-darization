@@ -123,7 +123,7 @@ def get_sentences_speaker_mapping( sentences, audio):
 class Predictor(BasePredictor):
     def setup(self):
         """Load necessary models and configurations."""
-        nltk.download('punkt')
+        nltk.download('punkt_tab')
         source_folder = './models/vad'
         destination_folder = '../root/.cache/torch'
         file_name = 'whisperx-vad-segmentation.bin'
