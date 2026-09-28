@@ -210,22 +210,10 @@ class Predictor(BasePredictor):
 
         random_uuid = uuid.uuid4()
         vocal_target  = f"temp-{random_uuid}.wav"
-        temp_outputs_dir = f"temp_{random_uuid}_outputs"
 
         try:
             # Download and convert audio to WAV
             vocal_target = self.download_audio_and_convert_to_wav(file_url,vocal_target)
-
-            # Separate vocals using Demucs
-            self.separate_vocals(vocal_target, temp_outputs_dir)
-
-            # Update vocal_target to point to the separated vocals
-            vocal_target = os.path.join(
-                temp_outputs_dir,
-                "htdemucs",
-                os.path.splitext(os.path.basename(vocal_target))[0],
-                "vocals.wav",
-            )
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -312,8 +300,6 @@ class Predictor(BasePredictor):
             try:
                 if 'vocal_target' in locals() and os.path.exists(vocal_target):
                     os.remove(vocal_target)
-                if os.path.exists(temp_outputs_dir):
-                    shutil.rmtree(temp_outputs_dir)
             except Exception as cleanup_exception:
                 logging.warning(f"Error during cleanup: {cleanup_exception}")
 
@@ -385,24 +371,3 @@ class Predictor(BasePredictor):
 
         os.remove(temp_audio_filename)
         return temp_wav_filename
-
-    def separate_vocals(self, audio_path, output_dir):
-        """Separates vocals from the audio using Demucs."""
-        command_demucs = [
-            'python3', '-m', 'demucs.separate',
-            '-n', 'htdemucs',
-            '--two-stems=vocals',
-            audio_path,
-            '-o', output_dir
-        ]
-        logging.info(f"Running Demucs command: {' '.join(command_demucs)}")
-        try:
-            subprocess.run(
-                command_demucs,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Demucs separation failed: {e.stderr.decode()}")
-            raise RuntimeError(f"Demucs separation failed: {e.stderr.decode()}")

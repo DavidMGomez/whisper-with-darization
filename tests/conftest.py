@@ -1,9 +1,9 @@
 """Lightweight stand-ins for predict.py's heavy runtime dependencies.
 
 The production requirements.txt pulls a CUDA-specific torch build plus
-whisperx, speechbrain, demucs, NeMo, google-cloud-pubsub, etc. -- gigabytes
-of GPU-only dependencies that would make the test suite slow, flaky, and
-impossible to run in ordinary CI. Only `torch` (CPU), `pandas`, `numpy`,
+whisperx, speechbrain, google-cloud-pubsub, etc. -- gigabytes of GPU-only
+dependencies that would make the test suite slow, flaky, and impossible to
+run in ordinary CI. Only `torch` (CPU), `pandas`, `numpy`,
 `requests` and `pytest` are real here (see requirements-test.txt); every
 other import predict.py/nemotron_diarization.py touch at module load time is
 registered as a minimal fake in sys.modules below, once, before any test

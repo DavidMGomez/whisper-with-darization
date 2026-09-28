@@ -1,9 +1,7 @@
-# NOTE: nvidia/Nemotron-3-Diarization needs Python >=3.12 and a recent NeMo/torch
-# stack (see ASR_INTEGRATION_GUIDE.md on the model's HF page). That is newer than
-# the torch 2.1.0+cu121 this project was pinned to for pyannote/whisperx, and
-# python_version had to be bumped in cog.yaml too. Validate with `cog build`
-# before deploying -- some pins below may need adjusting once NeMo's resolver
-# picks a torch/cuda combination.
+# NOTE: nvidia/Nemotron-3-Diarization is loaded via transformers'
+# AutoModelForAudioFrameClassification/AutoProcessor (see
+# nemotron_diarization.py) -- not the native NeMo toolkit -- so nemo_toolkit
+# itself is not a dependency. Validate with `cog build` before deploying.
 --extra-index-url https://download.pytorch.org/whl/cu124
 torch==2.4.0+cu124
 torchvision==0.19.0+cu124
@@ -21,19 +19,7 @@ nltk
 requests
 google-cloud-pubsub
 pydub
-# demucs's PyPI sdist doesn't ship requirements_minimal.txt, which its own
-# setup.py reads at build time ("FileNotFoundError: ... requirements_minimal.txt").
-# Another pre-existing packaging break; GitHub HEAD has the file.
-git+https://github.com/facebookresearch/demucs.git
 speechbrain
-# Pinned: unpinned nemo_toolkit[asr] let pip's resolver backtrack all the way
-# down to the ancient 1.23.0 release (chasing a conflict against our other
-# pins) whose deps include youtokentome, a Cython extension with no cp312
-# wheel. Pinning to a current release keeps the resolver on a modern,
-# coherent dependency set; Cython is added defensively in case any other
-# sub-dependency still needs to build from source.
 transformers
-Cython
-nemo_toolkit[asr]==2.0.0
 git+https://github.com/openai/whisper.git
 git+https://github.com/m-bain/whisperx.git

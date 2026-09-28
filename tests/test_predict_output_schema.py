@@ -69,9 +69,8 @@ def _base_kwargs(**overrides):
 def predictor(monkeypatch):
     p = predict.Predictor()
 
-    # Skip real network/subprocess I/O -- not what this test is about.
+    # Skip real network I/O -- not what this test is about.
     monkeypatch.setattr(p, "download_audio_and_convert_to_wav", lambda file_url, temp_wav_filename: temp_wav_filename)
-    monkeypatch.setattr(p, "separate_vocals", lambda audio_path, output_dir: None)
 
     fake_model = type("FakeWhisperModel", (), {
         "transcribe": staticmethod(lambda audio, batch_size: _fake_transcript_result())
