@@ -1,8 +1,12 @@
 build:
-  # Bumped from cuda 12.1 / python 3.11 (pyannote/whisperx pins). Matches the
-  # torch==2.8.0+cu128 pin in requirements.txt, needed because whisperx's
-  # GitHub HEAD now requires torch~=2.8.0.
-  cuda: "12.8"
+  # cog v0.8.0-beta3 (the only version whose `cog login --token-stdin`
+  # accepts our plain REPLICATE_API_TOKEN -- see main.yml) only recognizes
+  # CUDA versions up to 12.1.1 in its base-image allowlist and errors with
+  # "CUDA 12.8 is not supported by Cog" otherwise. This only picks the base
+  # Docker image's system CUDA toolkit; the torch==2.8.0+cu128 wheels in
+  # requirements.txt bundle their own CUDA runtime libraries and only need a
+  # new-enough NVIDIA driver on the host, which Replicate's GPUs have.
+  cuda: "12.1"
   gpu: true
   system_packages:
     - "ffmpeg"
