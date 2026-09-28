@@ -58,8 +58,10 @@ def _base_kwargs(**overrides):
         use_speaker_confirmation=False,
         confirmation_provider="jev",
         jev_api_key=None,
-        confirmation_confidence_threshold=0.55,
+        confirmation_confidence_threshold=0.67,
         confirmation_gap_threshold_seconds=1.5,
+        confirmation_context_window=3,
+        confirmation_batch_size=8,
     )
     kwargs.update(overrides)
     return kwargs
@@ -114,6 +116,12 @@ def test_confirmation_adds_only_additive_keys_when_enabled(monkeypatch, predicto
     class _StubProvider(predict.confirmation.SpeakerConfirmationProvider):
         def confirm_speaker(self, text, candidate_speakers, context_before=None, context_after=None):
             return predict.confirmation.ConfirmationResult(speaker="SPEAKER_00", confidence=0.99, raw={})
+
+        def confirm_continuation(self, established_context, established_speaker, candidate_texts):
+            return [
+                predict.confirmation.ContinuationResult(same_speaker=True, confidence=0.99, raw={})
+                for _ in candidate_texts
+            ]
 
     monkeypatch.setattr(predict.confirmation, "get_confirmation_provider", lambda name, api_key: _StubProvider())
     monkeypatch.setattr(predict.nemotron_diarization, "confidence_for_range", lambda *a, **k: 0.1)  # force it on

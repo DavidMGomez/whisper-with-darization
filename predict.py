@@ -195,14 +195,26 @@ class Predictor(BasePredictor):
         ),
         confirmation_confidence_threshold: float = Input(
             description="Diarization segments with a speaker-confidence score below this "
-                        "(0-1) are sent for confirmation when use_speaker_confirmation is true.",
-            default=0.55
+                        "(0-1) are sent for confirmation when use_speaker_confirmation is true. "
+                        "We require >67% confidence to trust Nemotron's raw assignment as-is.",
+            default=0.67
         ),
         confirmation_gap_threshold_seconds: float = Input(
             description="Segments preceded by a silence gap longer than this (seconds) are sent "
                         "for confirmation when use_speaker_confirmation is true, since a long "
                         "pause makes a speaker change more likely.",
             default=1.5
+        ),
+        confirmation_context_window: int = Input(
+            description="How many trailing same-speaker segments feed the established context "
+                        "that continuation checks compare each ambiguous segment against.",
+            default=3
+        ),
+        confirmation_batch_size: int = Input(
+            description="How many consecutive ambiguous segments get batched into a single "
+                        "confirmation-provider request (multiple questions, one call) instead of "
+                        "one request per segment.",
+            default=8
         )
     ) -> Output:
         if file_url is None:
@@ -266,6 +278,8 @@ class Predictor(BasePredictor):
                         confidence_threshold=confirmation_confidence_threshold,
                         gap_threshold_seconds=confirmation_gap_threshold_seconds,
                         provider=provider,
+                        context_window=confirmation_context_window,
+                        batch_size=confirmation_batch_size,
                     )
 
                 # Send success message to Pub/Sub if credentials are provided
