@@ -23,7 +23,14 @@ google-cloud-pubsub
 pydub
 demucs
 speechbrain
+# Pinned: unpinned nemo_toolkit[asr] let pip's resolver backtrack all the way
+# down to the ancient 1.23.0 release (chasing a conflict against our other
+# pins) whose deps include youtokentome, a Cython extension with no cp312
+# wheel. Pinning to a current release keeps the resolver on a modern,
+# coherent dependency set; Cython is added defensively in case any other
+# sub-dependency still needs to build from source.
 transformers
-nemo_toolkit[asr]
+Cython
+nemo_toolkit[asr]==2.0.0
 git+https://github.com/openai/whisper.git
 git+https://github.com/m-bain/whisperx.git
