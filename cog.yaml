@@ -6,7 +6,7 @@ build:
   # Docker image's system CUDA toolkit; the torch==2.8.0+cu128 wheels in
   # requirements.txt bundle their own CUDA runtime libraries and only need a
   # new-enough NVIDIA driver on the host, which Replicate's GPUs have.
-  cuda: "12.1"
+  cuda: "12.1.1"
   gpu: true
   system_packages:
     - "ffmpeg"
