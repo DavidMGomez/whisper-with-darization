@@ -64,5 +64,46 @@ jobs:
             wget -O "models/faster-whisper-large-v3-turbo/$f" "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/$f"
           done
 
+      - name: Restore Docker image cache
+        # cog v0.8.0-beta3 has no remote-cache support of its own (no
+        # --cache-from/--cache-to, confirmed in its source), so the only way
+        # to give its build a head start is priming the local Docker
+        # daemon's layer cache from a previous run's saved image. Keyed on
+        # requirements.txt/cog.yaml so a dependency change starts fresh
+        # instead of reusing a stale, incompatible cache; falls back to the
+        # most recent cache for this branch otherwise so still-unchanged
+        # layers (system packages, python setup) can be reused even after a
+        # requirements.txt tweak. Best-effort: if this image is too large
+        # for actions/cache's limit, restore/save just no-op and the push
+        # still runs normally, uncached.
+        id: restore_docker_cache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: /tmp/docker-image-cache/image.tar
+          key: docker-image-${{ github.ref_name }}-${{ hashFiles('requirements.txt', 'cog.yaml') }}
+          restore-keys: |
+            docker-image-${{ github.ref_name }}-
+
+      - name: Load cached image into Docker
+        if: steps.restore_docker_cache.outputs.cache-hit != ''
+        continue-on-error: true
+        run: docker load -i /tmp/docker-image-cache/image.tar
+
       - name: Push to Replicate
         run: cog push r8.im/${{ inputs.model_name }}
+
+      - name: Save Docker image cache
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/docker-image-cache
+          docker save r8.im/${{ inputs.model_name }} -o /tmp/docker-image-cache/image.tar
+
+      - name: Cache Docker image
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/docker-image-cache/image.tar
+          key: docker-image-${{ github.ref_name }}-${{ hashFiles('requirements.txt', 'cog.yaml') }}
