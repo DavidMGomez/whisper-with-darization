@@ -14,7 +14,14 @@ import pandas as pd
 import torch
 from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 
-MODEL_ID = "nvidia/Nemotron-3-Diarization"
+# Baked into the image at build time (see .github/workflows/main.yml's
+# "Download Nemotron model" step) rather than loaded from the HF Hub id at
+# request time: Replicate's runtime network path to huggingface.co goes
+# through an internal proxy that isn't fully reliable (hit both an outright
+# SSRF-policy refusal for NLTK data and, separately, a flaky
+# "peer closed connection" mid-download for this model's safetensors file).
+# Baking removes that dependency entirely instead of hoping retries succeed.
+MODEL_PATH = "./models/nemotron-3-diarization"
 
 _processor = None
 _model = None
@@ -23,9 +30,9 @@ _model = None
 def _load():
     global _processor, _model
     if _model is None:
-        _processor = AutoProcessor.from_pretrained(MODEL_ID)
+        _processor = AutoProcessor.from_pretrained(MODEL_PATH)
         _model = AutoModelForAudioFrameClassification.from_pretrained(
-            MODEL_ID, device_map="auto"
+            MODEL_PATH, device_map="auto"
         )
         _model.eval()
     return _processor, _model

@@ -64,6 +64,20 @@ jobs:
             wget -O "models/faster-whisper-large-v3-turbo/$f" "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/$f"
           done
 
+      - name: Download Nemotron-3-Diarization model
+        # Loading nvidia/Nemotron-3-Diarization by HF Hub id at request time
+        # hit a flaky "peer closed connection" downloading model.safetensors
+        # through Replicate's internal HF proxy -- same class of runtime
+        # network unreliability as the NLTK punkt_tab SSRF block. Baking the
+        # weights into the image (nemotron_diarization.py now loads from
+        # MODEL_PATH="./models/nemotron-3-diarization") removes that
+        # dependency the same way the Whisper models above already do.
+        run: |
+          mkdir -p models/nemotron-3-diarization
+          for f in config.json processor_config.json model.safetensors; do
+            wget -O "models/nemotron-3-diarization/$f" "https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/$f"
+          done
+
       - name: Restore Docker image cache
         # cog v0.8.0-beta3 has no remote-cache support of its own (no
         # --cache-from/--cache-to, confirmed in its source), so the only way
