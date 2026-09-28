@@ -8,6 +8,14 @@
 torch==2.4.0+cu124
 torchvision==0.19.0+cu124
 torchaudio==2.4.0+cu124
+# openai-whisper's last PyPI release (20240930) is a source-only sdist whose
+# legacy setup.py does `import pkg_resources`; that fails to build under
+# uv/pip's isolated build env with a current setuptools ("ModuleNotFoundError:
+# No module named 'pkg_resources'") -- a pre-existing packaging break
+# unrelated to this migration, hit as soon as anyone tries a fresh build.
+# Installing from GitHub HEAD (same pattern already used for whisperx below)
+# picks up any packaging fixes made since that last PyPI release.
+setuptools<81
 ffmpeg-python
 nltk
 requests
@@ -17,5 +25,5 @@ demucs
 speechbrain
 transformers
 nemo_toolkit[asr]
-openai-whisper
+git+https://github.com/openai/whisper.git
 git+https://github.com/m-bain/whisperx.git
