@@ -26,6 +26,11 @@ pydub
 # pip backtrack all the way down to the 0.5.x line (years old), which pins
 # torch<=1.11, conflicting with our torch==2.4 pin.
 speechbrain==1.1.0
-transformers
+# nvidia/Nemotron-3-Diarization's own README says to install transformers
+# from source ("pip install git+https://github.com/huggingface/transformers"):
+# its custom Nemotron3DiarizationProcessor/NemotronAsrStreamingFeatureExtractor
+# classes aren't in any PyPI transformers release yet. Without this,
+# AutoProcessor.from_pretrained fails with "Unrecognized processing class".
+git+https://github.com/huggingface/transformers.git
 git+https://github.com/openai/whisper.git
 git+https://github.com/m-bain/whisperx.git
