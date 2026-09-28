@@ -9,21 +9,26 @@ on:
 
 jobs:
   build:
-    # replicate/setup-cog@v1.0.2 installs its own fixed CUDA 12.1.0 toolkit
-    # (independent of this project's cog.yaml `cuda:` value) via
-    # Jimver/cuda-toolkit, whose installer fails to verify gcc on Ubuntu
-    # 24.04 ("Failed to verify gcc version"). Pinning 22.04 keeps an older,
-    # compatible gcc. This workflow had 0 successful runs before this fix.
+    # replicate/setup-cog@v1.0.2 bundles a CUDA-toolkit install (via
+    # Jimver/cuda-toolkit) that isn't actually needed just to build and push
+    # a Docker image -- CUDA only matters at inference time, on Replicate's
+    # own GPUs. That bundled installer failed on both ubuntu-latest (gcc
+    # too new) and ubuntu-22.04 (a follow-up bug uploading its own failure
+    # log as a build artifact masked the real error). This workflow had 0
+    # successful runs ever. Installing the cog CLI directly sidesteps all
+    # of that.
     runs-on: ubuntu-22.04
     steps:
       - name: Check out code
         uses: actions/checkout@v3
 
-      - name: Setup Cog
-        uses: replicate/setup-cog@v1.0.2
-        with:
-          token: ${{ secrets.REPLICATE_API_TOKEN }}
+      - name: Install Cog CLI
+        run: |
+          sudo curl -o /usr/local/bin/cog -L "https://github.com/replicate/cog/releases/latest/download/cog_$(uname -s)_$(uname -m)"
+          sudo chmod +x /usr/local/bin/cog
+
+      - name: Log in to Replicate
+        run: echo "${{ secrets.REPLICATE_API_TOKEN }}" | cog login --token-stdin
 
       - name: Push to Replicate
-        run: |
-          cog push r8.im/${{ inputs.model_name }}
+        run: cog push r8.im/${{ inputs.model_name }}
