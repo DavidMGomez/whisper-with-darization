@@ -42,7 +42,10 @@ mtypes = {"cpu": "int8", "cuda": "float16"}
 
 compute_type = "float16"  # change to "int8" if low on GPU mem (may reduce accuracy)
 device = "cuda"
-whisper_arch = "./models/faster-whisper-large-v3"
+WHISPER_MODEL_PATHS = {
+    "large-v3": "./models/faster-whisper-large-v3",
+    "large-v3-turbo": "./models/faster-whisper-large-v3-turbo",
+}
 
 class Output(BaseModel):
     segments: List[dict]
@@ -144,6 +147,13 @@ class Predictor(BasePredictor):
             description="Batch size for batched inference",
             default=8
         ),
+        whisper_model: str = Input(
+            description="Which faster-whisper model to transcribe with. large-v3-turbo is "
+                        "2-4x faster with a small (~1-2%) WER increase; large-v3 is kept for "
+                        "rollback if turbo's accuracy isn't good enough for a given use case.",
+            default="large-v3-turbo",
+            choices=["large-v3", "large-v3-turbo"]
+        ),
         multimedia_part_id: str = Input(
             description="Multimedia part ID", default=None
         ),
@@ -221,6 +231,7 @@ class Predictor(BasePredictor):
 
             start_time = time.time_ns() / 1e6
             
+            whisper_arch = WHISPER_MODEL_PATHS[whisper_model]
             model = whisperx.load_model(whisper_arch, device, compute_type=compute_type, language=language,
                                         asr_options={"temperatures": [0]}, vad_options={"vad_onset": 0.500,"vad_offset": 0.363})
             
