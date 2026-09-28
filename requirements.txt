@@ -35,6 +35,13 @@ speechbrain==1.1.0
 # librosa for audio feature extraction ("NemotronAsrStreamingFeatureExtractor
 # requires the librosa library").
 librosa
+# AutoModelForAudioFrameClassification.from_pretrained(..., device_map="auto")
+# in nemotron_diarization.py requires accelerate for automatic device
+# placement; transformers doesn't pull it in as a hard dependency. Not hit
+# in any deploy yet (AutoProcessor.from_pretrained already failed earlier in
+# the same _load() call), but device_map="auto" would raise ImportError the
+# moment that got fixed.
+accelerate
 git+https://github.com/huggingface/transformers.git
 git+https://github.com/openai/whisper.git
 git+https://github.com/m-bain/whisperx.git
