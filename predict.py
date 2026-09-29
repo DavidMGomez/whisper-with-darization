@@ -21,6 +21,7 @@ from pydub import AudioSegment
 from speechbrain.pretrained import EncoderClassifier
 import confirmation
 import nemotron_diarization
+import speaker_naming
 from transcription_helpers import transcribe_batched
 from whisper.tokenizer import LANGUAGES, TO_LANGUAGE_CODE
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
@@ -90,8 +91,7 @@ def get_audio_segment(signal, start_time, end_time):
     return signal[int(start_time * 1000):int(end_time * 1000)]  # Convert seconds to milliseconds
 
 
-
-def get_sentences_speaker_mapping( sentences, audio):
+def get_sentences_speaker_mapping(sentences, audio):
     """
     Processes the list of words with speaker labels and groups them into sentences
     with speaker embeddings.
@@ -242,6 +242,39 @@ class Predictor(BasePredictor):
                         "confirmation-provider request (multiple questions, one call) instead of "
                         "one request per segment.",
             default=8
+        ),
+        classify_speaker_roles: bool = Input(
+            description="If true (and use_speaker_confirmation is also true), segments within "
+                        "speaker_role_window_seconds of the start are scanned for "
+                        "self-introductions or name/role mentions, and confirmation_provider is "
+                        "asked to classify each such speaker into one of hearing_roles. Segments "
+                        "get a speaker_role key (a role, or null if it couldn't be determined).",
+            default=False
+        ),
+        speaker_role_window_seconds: int = Input(
+            description="Only segments starting before this many seconds into the audio are "
+                        "considered for speaker-role classification -- legal hearings "
+                        "conventionally have everyone state their name/role near the start.",
+            default=speaker_naming.DEFAULT_INTRO_WINDOW_SECONDS
+        ),
+        hearing_roles: str = Input(
+            description="Comma-separated candidate list of names/roles to classify speakers "
+                        "into, skipping OpenAI extraction entirely. Leave unset to instead "
+                        "extract candidates from the hearing's own flagged segments via "
+                        f"openai_api_key (falling back to a fixed default universe if that "
+                        f"isn't set or fails: {', '.join(speaker_naming.DEFAULT_ROLES)}).",
+            default=None
+        ),
+        openai_api_key: str = Input(
+            description="API key used to extract candidate names/roles from the hearing's own "
+                        "flagged segments (Jev has no free-text question type, so this is a "
+                        "separate provider for that one open-ended step). Falls back to the "
+                        "OPENAI_API_KEY env var if not set; ignored if hearing_roles is set.",
+            default=None
+        ),
+        openai_model: str = Input(
+            description="OpenAI chat-completion model used for candidate name/role extraction.",
+            default=speaker_naming.DEFAULT_OPENAI_MODEL
         )
     ) -> Output:
         if file_url is None:
@@ -288,7 +321,6 @@ class Predictor(BasePredictor):
             if language in wav2vec2_langs:
                 result = self.align(audio, result)
                 result, segment_confidences = self.diarize(audio, result, max_num_speakers)
-                # Get sentences with speaker mapping
                 segments = get_sentences_speaker_mapping(
                     result["segments"],
                     AudioSegment.from_file(vocal_target).set_channels(1)
@@ -308,6 +340,16 @@ class Predictor(BasePredictor):
                         context_window=confirmation_context_window,
                         batch_size=confirmation_batch_size,
                     )
+
+                    if classify_speaker_roles:
+                        segments = speaker_naming.identify_speaker_roles(
+                            segments,
+                            provider=provider,
+                            intro_window_seconds=speaker_role_window_seconds,
+                            roles=[r.strip() for r in hearing_roles.split(",")] if hearing_roles else None,
+                            openai_api_key=openai_api_key or os.environ.get("OPENAI_API_KEY"),
+                            openai_model=openai_model,
+                        )
 
                 # Send success message to Pub/Sub if credentials are provided
                 pubsub_notified = None

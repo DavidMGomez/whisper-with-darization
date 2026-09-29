@@ -81,6 +81,36 @@ class SpeakerConfirmationProvider(abc.ABC):
         """
         ...
 
+    def detect_identifying_content(self, texts: List[str]) -> List[bool]:
+        """For each of texts (in order), decides whether it contains a
+        self-introduction or someone stating/being addressed by a name or
+        role. Batched into as few requests as the provider can manage. Must
+        return exactly one bool per text, in order.
+
+        Not an abstract method: providers that don't support speaker-role
+        classification (speaker_naming.py's feature) can simply not
+        override this -- the default raises, which speaker_naming.py
+        already treats the same as any other provider failure (leaves the
+        affected segments unresolved rather than failing the request).
+        """
+        raise NotImplementedError
+
+    def classify_roles(
+        self, texts_by_label: Dict[str, str], candidate_roles: Dict[str, str]
+    ) -> Dict[str, ConfirmationResult]:
+        """Given each flagged speaker's combined utterances (keyed by
+        diarization label), decides which of candidate_roles each one most
+        likely is, in as few requests as the provider can manage.
+        candidate_roles maps each option to a short description used as its
+        selection criteria, and should always include an explicit "cannot
+        determine" option. Must return exactly one result per key in
+        texts_by_label.
+
+        Not abstract for the same reason as detect_identifying_content.
+        """
+        raise NotImplementedError
+
+
 
 class JevConfirmationProvider(SpeakerConfirmationProvider):
     """Uses TypeSafe's Jev "System One" model (https://docs.typesafe.ai).
@@ -180,6 +210,101 @@ class JevConfirmationProvider(SpeakerConfirmationProvider):
             results.append(ContinuationResult(same_speaker=noul >= 0.5, confidence=noul, raw=answer))
         return results
 
+    def detect_identifying_content(self, texts):
+        # Per docs.typesafe.ai's how-to-build-with-system-one guide (the
+        # triage_ticket.py reference example): every segment goes into the
+        # shared `state` dict under its own key; each question's
+        # `instructions` is a structured object (a "question" field
+        # referencing its one segment by name in backticks, plus a "focus"
+        # field for extra guidance) rather than a bare string or a
+        # duplicated copy of the segment text; and `noul` questions spell
+        # out explicit true/false criteria with examples instead of leaving
+        # the model to infer them purely from the instructions text.
+        if not texts:
+            return []
+
+        state = {f"seg_{i}": text for i, text in enumerate(texts)}
+        questions = {
+            f"segment_{i}": {
+                "type": "noul",
+                "instructions": {
+                    "question": (
+                        f"Does `seg_{i}` contain a self-introduction, "
+                        "someone stating their own name or role, or someone "
+                        "else addressing them by name or role?"
+                    ),
+                    "focus": (
+                        "This is a segment from a transcribed legal hearing. "
+                        "Roles include e.g. judge, plaintiff, defendant, "
+                        "prosecutor, defense counsel, witness, clerk."
+                    ),
+                },
+                "criteria": {
+                    "true": {
+                        "what": (
+                            "A self-introduction, a stated name or role "
+                            "(e.g. judge, plaintiff, defendant, prosecutor, "
+                            "defense counsel, witness, clerk), or someone "
+                            "being addressed by name or role"
+                        ),
+                        "examples": [
+                            "Buenos dias, soy la jueza de este despacho.",
+                            "Representa usted al demandado, doctor Gomez?",
+                        ],
+                    },
+                    "false": {
+                        "what": "No name or role is mentioned or addressed",
+                        "examples": ["Procedamos entonces con la audiencia."],
+                    },
+                },
+            }
+            for i in range(len(texts))
+        }
+        answers = self._post(state=state, questions=questions)
+        return [float(answers[f"segment_{i}"].get("noul", 0.0)) >= 0.5 for i in range(len(texts))]
+
+    def classify_roles(self, texts_by_label, candidate_roles):
+        # Batched, like confirm_continuation/detect_identifying_content: one
+        # "choice" question per speaker in a single request instead of one
+        # request per speaker. Same state/instructions-object pattern as
+        # detect_identifying_content; each candidate role gets its own
+        # criteria description rather than a bare placeholder.
+        if not texts_by_label:
+            return {}
+
+        labels = list(texts_by_label.keys())
+        state = {f"speaker_{i}": texts_by_label[label] for i, label in enumerate(labels)}
+        questions = {
+            f"speaker_{i}": {
+                "type": "choice",
+                "instructions": {
+                    "question": f"Which role does `speaker_{i}` most likely have?",
+                    "focus": (
+                        f"`speaker_{i}` lists the combined statements of a "
+                        "single speaker from the opening of a legal hearing. "
+                        "Choose the cannot-determine option explicitly "
+                        "rather than guessing if it isn't clear from this "
+                        "text."
+                    ),
+                },
+                "criteria": {
+                    role: {"what": description}
+                    for role, description in candidate_roles.items()
+                },
+            }
+            for i, label in enumerate(labels)
+        }
+        answers = self._post(state=state, questions=questions)
+
+        results = {}
+        for i, label in enumerate(labels):
+            answer = answers[f"speaker_{i}"]
+            results[label] = ConfirmationResult(
+                speaker=answer["choice"],
+                confidence=float(answer.get("confidence", 0.0)),
+                raw=answer,
+            )
+        return results
 
 PROVIDERS: Dict[str, type] = {
     "jev": JevConfirmationProvider,

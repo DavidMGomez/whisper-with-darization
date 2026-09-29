@@ -62,6 +62,11 @@ def _base_kwargs(**overrides):
         confirmation_gap_threshold_seconds=1.5,
         confirmation_context_window=3,
         confirmation_batch_size=8,
+        classify_speaker_roles=False,
+        speaker_role_window_seconds=1800,
+        hearing_roles=None,
+        openai_api_key=None,
+        openai_model="gpt-4o-mini",
     )
     kwargs.update(overrides)
     return kwargs
@@ -133,3 +138,32 @@ def test_confirmation_adds_only_additive_keys_when_enabled(monkeypatch, predicto
         assert "speaker_confidence" in segment
         assert "jev_checked" in segment
         assert "speaker_confirmed_by" in segment
+
+
+def test_classify_speaker_roles_resolves_role_end_to_end(monkeypatch, predictor):
+    class _StubProvider(predict.confirmation.SpeakerConfirmationProvider):
+        def confirm_speaker(self, text, candidate_speakers, context_before=None, context_after=None):
+            return predict.confirmation.ConfirmationResult(speaker="SPEAKER_00", confidence=0.99, raw={})
+
+        def confirm_continuation(self, established_context, established_speaker, candidate_texts):
+            return [
+                predict.confirmation.ContinuationResult(same_speaker=True, confidence=0.99, raw={})
+                for _ in candidate_texts
+            ]
+
+        def detect_identifying_content(self, texts):
+            return [True for _ in texts]
+
+        def classify_roles(self, texts_by_label, candidate_roles):
+            return {
+                label: predict.confirmation.ConfirmationResult(speaker="Juez", confidence=0.9, raw={})
+                for label in texts_by_label
+            }
+
+    monkeypatch.setattr(predict.confirmation, "get_confirmation_provider", lambda name, api_key: _StubProvider())
+
+    output = predictor.predict(**_base_kwargs(use_speaker_confirmation=True, classify_speaker_roles=True))
+
+    for segment in output.segments:
+        assert LEGACY_SEGMENT_KEYS.issubset(segment.keys())
+        assert segment["speaker_role"] == "Juez"

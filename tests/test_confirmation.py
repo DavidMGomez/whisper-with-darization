@@ -78,6 +78,87 @@ def test_jev_provider_confirm_continuation_batches_into_one_request(monkeypatch)
     assert results[1].confidence == 0.1
 
 
+def test_jev_provider_detect_identifying_content_batches_into_one_request(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(json=json)
+        return _FakeResponse({
+            "answers": {
+                "segment_0": {"noul": 0.95},
+                "segment_1": {"noul": 0.05},
+            }
+        })
+
+    monkeypatch.setattr(confirmation.requests, "post", fake_post)
+
+    provider = confirmation.JevConfirmationProvider(api_key="secret-key")
+    flags = provider.detect_identifying_content([
+        "soy el juez de este despacho",
+        "procedamos con la audiencia",
+    ])
+
+    assert flags == [True, False]
+    assert len(captured["json"]["questions"]) == 2
+    assert captured["json"]["questions"]["segment_0"]["type"] == "noul"
+    # Segments go into the shared state dict, referenced by name in backticks
+    # from each question's structured instructions object -- not string-
+    # concatenated directly into a plain instructions string.
+    assert captured["json"]["state"] == {
+        "seg_0": "soy el juez de este despacho",
+        "seg_1": "procedamos con la audiencia",
+    }
+    assert "`seg_0`" in captured["json"]["questions"]["segment_0"]["instructions"]["question"]
+    assert "true" in captured["json"]["questions"]["segment_0"]["criteria"]
+    assert "false" in captured["json"]["questions"]["segment_0"]["criteria"]
+
+
+def test_jev_provider_classify_roles_batches_all_speakers_into_one_request(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(json=json)
+        return _FakeResponse({
+            "answers": {
+                "speaker_0": {"choice": "Juez", "confidence": 0.92},
+                "speaker_1": {"choice": "Demandante", "confidence": 0.81},
+            }
+        })
+
+    monkeypatch.setattr(confirmation.requests, "post", fake_post)
+
+    provider = confirmation.JevConfirmationProvider(api_key="secret-key")
+    results = provider.classify_roles(
+        texts_by_label={
+            "SPEAKER_00": "soy la jueza de este despacho",
+            "SPEAKER_01": "represento al demandante",
+        },
+        candidate_roles={
+            "Juez": "The speaker is a judge",
+            "Demandante": "The speaker is the plaintiff",
+            "Demandado": "The speaker is the defendant",
+            "No determinado": "Cannot be determined from this text",
+        },
+    )
+
+    assert results["SPEAKER_00"].speaker == "Juez"
+    assert results["SPEAKER_00"].confidence == 0.92
+    assert results["SPEAKER_01"].speaker == "Demandante"
+    assert len(captured["json"]["questions"]) == 2  # one HTTP request, two speakers
+    assert captured["json"]["questions"]["speaker_0"]["type"] == "choice"
+    assert captured["json"]["questions"]["speaker_0"]["criteria"] == {
+        "Juez": {"what": "The speaker is a judge"},
+        "Demandante": {"what": "The speaker is the plaintiff"},
+        "Demandado": {"what": "The speaker is the defendant"},
+        "No determinado": {"what": "Cannot be determined from this text"},
+    }
+    assert captured["json"]["state"] == {
+        "speaker_0": "soy la jueza de este despacho",
+        "speaker_1": "represento al demandante",
+    }
+    assert "`speaker_0`" in captured["json"]["questions"]["speaker_0"]["instructions"]["question"]
+
+
 def test_jev_provider_requires_api_key():
     with pytest.raises(ValueError):
         confirmation.JevConfirmationProvider(api_key=None)
