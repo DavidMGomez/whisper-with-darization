@@ -135,7 +135,7 @@ def test_identify_speaker_roles_explicit_roles_skip_extraction(monkeypatch):
 
 def test_identify_speaker_roles_uses_extracted_identities_when_available(monkeypatch):
     monkeypatch.setattr(
-        speaker_naming, "extract_candidate_identities", lambda texts, api_key, model: ["Maria Fernanda Restrepo"]
+        speaker_naming, "extract_candidate_identities", lambda texts, api_key, model, **kwargs: ["Maria Fernanda Restrepo"]
     )
 
     provider = _FakeProvider(
@@ -368,3 +368,100 @@ def test_suggestions_never_call_verifier_or_include_embedding_metadata():
     assert identity['status'] == 'suggested'
     assert identity['name'] == 'Mario Enrique Gómez Jiménez'
     assert 'speaker_embedding' not in identity['evidence'][0]
+
+
+def _mock_identity_response(monkeypatch, entities):
+    class Response:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {'choices': [{'message': {'content': json.dumps(entities)}}]}
+    monkeypatch.setattr(speaker_naming.requests, 'post', lambda *a, **kw: Response())
+
+
+def test_elliptical_defender_recovers_own_name_not_clients(monkeypatch):
+    text = ('apoderada de víctimas y demás participantes en la presente vista por la defensa técnica '
+            'del señor José Otto Valderrama Castro, representante de su despacho, Néstor Valderrama '
+            'Castro, con datos de identificación que ya aparece en registro.')
+    _mock_identity_response(monkeypatch, [
+        {'name': 'José Otto Valderrama Castro', 'role': 'Acusado', 'introductions': []},
+        {'name': 'Néstor Valderrama Castro', 'role': 'Defensor', 'introductions': [
+            {'excerpt_index': 0, 'quote': text, 'confidence': .84}]},
+        {'name': None, 'role': 'Defensor'},
+    ])
+    provider = _FakeProvider({text: True}, {text: ('Defensor', .91)})
+    result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider,
+                                                  openai_api_key='fake')
+    identity = result[0]['speaker_identity']
+    assert identity['name'] == 'Néstor Valderrama Castro'
+    assert identity['role'] == 'Defensor'
+    assert identity['name_confidence'] == .84
+    assert identity['status'] == 'suggested' and identity['verified'] is False
+
+
+def test_name_recovery_rejects_ungrounded_or_low_score_metadata(monkeypatch):
+    text = 'Por la defensa técnica, Néstor Castro.'
+    for intro in [
+        {'excerpt_index': 4, 'quote': text, 'confidence': .9},
+        {'excerpt_index': 0, 'quote': 'Mi nombre es Néstor Castro', 'confidence': .9},
+        {'excerpt_index': 0, 'quote': text, 'confidence': .6},
+        {'excerpt_index': 0, 'quote': text, 'confidence': True},
+    ]:
+        _mock_identity_response(monkeypatch, [{'name': 'Néstor Castro', 'role': 'Defensor',
+                                             'introductions': [intro]}])
+        candidates = speaker_naming.extract_candidate_identities([text], 'fake')
+        assert candidates[0].introductions == []
+
+
+def test_name_in_next_piece_of_same_turn_is_included(monkeypatch):
+    first, second = 'Por la defensa técnica del señor José Otto.', 'Néstor Castro, datos ya registrados.'
+    seen = []
+    def extract(texts, api_key, model, **kwargs):
+        seen.extend(texts)
+        candidate = speaker_naming._format_identity('Néstor Castro', 'Defensor')
+        candidate.introductions = [{'excerpt_index': 1, 'confidence': .83}]
+        return [candidate, 'Defensor']
+    monkeypatch.setattr(speaker_naming, 'extract_candidate_identities', extract)
+    segments = [dict(_segments()[0], text=first), dict(_segments()[0], start=2, end=4, text=second)]
+    provider = _FakeProvider({first: True}, {first + ' ' + second: ('Defensor', .9)})
+    result = speaker_naming.identify_speaker_roles(segments, provider, openai_api_key='fake')
+    assert seen == [first, second]
+    assert result[0]['speaker_name'] == 'Néstor Castro'
+
+
+def test_competing_anchored_names_do_not_guess(monkeypatch):
+    text = 'Néstor Castro y José Otto.'
+    _mock_identity_response(monkeypatch, [
+        {'name': name, 'role': 'Defensor', 'introductions': [
+            {'excerpt_index': 0, 'quote': text, 'confidence': .9}]}
+        for name in ['Néstor Castro', 'José Otto']
+    ] + [{'name': None, 'role': 'Defensor'}])
+    result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)],
+        _FakeProvider({text: True}, {text: ('Defensor', .9)}), openai_api_key='fake')
+    assert result[0]['speaker_identity']['name'] is None
+
+
+def test_extractor_receives_adjacent_speakers_as_context_only(monkeypatch):
+    captured = {}
+    class Response:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {'choices': [{'message': {'content': '[]'}}]}
+    def post(*args, **kwargs):
+        captured.update(kwargs['json'])
+        return Response()
+    monkeypatch.setattr(speaker_naming.requests, 'post', post)
+    segments = [
+        {'start': 0, 'end': 2, 'speaker': 'SPEAKER_00', 'text': 'Soy la jueza Ana López. Preséntese la defensa.'},
+        {'start': 2, 'end': 4, 'speaker': 'SPEAKER_01', 'text': 'Néstor Castro, datos registrados.'},
+        {'start': 4, 'end': 6, 'speaker': 'SPEAKER_00', 'text': 'Gracias, doctor. Representa al señor José Otto.'},
+    ]
+    provider = _FakeProvider({segments[1]['text']: True}, {})
+    speaker_naming.identify_speaker_roles(segments, provider, openai_api_key='fake')
+    payload = captured['messages'][1]['content'].split('\n\n', 1)[1]
+    excerpts = json.loads(payload)
+    assert len(excerpts) == 1
+    assert excerpts[0]['target']['speaker'] == 'SPEAKER_01'
+    assert excerpts[0]['previous']['speaker'] == 'SPEAKER_00'
+    assert excerpts[0]['next']['text'] == segments[2]['text']
