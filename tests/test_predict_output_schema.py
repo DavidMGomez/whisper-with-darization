@@ -154,6 +154,9 @@ def test_classify_speaker_roles_resolves_role_end_to_end(monkeypatch, predictor)
         def detect_identifying_content(self, texts):
             return [True for _ in texts]
 
+        def verify_identities(self, candidates):
+            return {label: .9 for label in candidates}
+
         def classify_roles(self, texts_by_label, candidate_roles):
             return {
                 label: predict.confirmation.ConfirmationResult(speaker="Juez", confidence=0.9, raw={})
@@ -167,3 +170,7 @@ def test_classify_speaker_roles_resolves_role_end_to_end(monkeypatch, predictor)
     for segment in output.segments:
         assert LEGACY_SEGMENT_KEYS.issubset(segment.keys())
         assert segment["speaker_role"] == "Juez"
+        assert segment["speaker_identity"]["role"] == "Juez"
+        assert segment["speaker_identity"]["name"] is None
+        assert segment["speaker_identity"]["confidence"] == .9
+        assert segment["speaker_identity"]["evidence"]
