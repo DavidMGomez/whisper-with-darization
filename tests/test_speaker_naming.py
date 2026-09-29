@@ -228,13 +228,15 @@ def test_rejects_low_unknown_and_nonfinite_confidence():
         assert result[0]['speaker_identity'] is None
 
 
-def test_mention_is_not_identity_when_verifier_rejects():
+def test_identification_remains_a_suggestion_without_secondary_verification():
     text = 'La abogada Maria Restrepo tiene la palabra.'
     provider = _FakeProvider({text: True}, {text: ('Maria Restrepo', .99)})
     provider.verify_identities = lambda identities: {key: .1 for key in identities}
     segments = [dict(_segments()[0], text=text)]
     result = speaker_naming.identify_speaker_roles(segments, provider, roles=['Maria Restrepo'])
-    assert result[0]['speaker_name'] is None
+    assert result[0]['speaker_name'] == 'Maria Restrepo'
+    assert result[0]['speaker_identity']['status'] == 'suggested'
+    assert result[0]['speaker_identity']['verified'] is False
 
 
 def test_named_identity_has_evidence_and_separate_fields():
@@ -247,15 +249,16 @@ def test_named_identity_has_evidence_and_separate_fields():
     assert identity['evidence'][0]['text'] == text
 
 
-def test_missing_verification_and_duplicate_names_fail_closed():
+def test_duplicate_suggestions_keep_separate_clusters_without_verification():
     text = 'Mi nombre es Maria Restrepo.'
     provider = _FakeProvider({text: True}, {text: ('Maria Restrepo', .99)})
     segments = [dict(_segments()[0], text=text), dict(_segments()[1], text=text)]
     result = speaker_naming.identify_speaker_roles(segments, provider, roles=['Maria Restrepo'])
-    assert all(s['speaker_identity'] is None for s in result)
+    assert all(s['speaker_identity']['status'] == 'suggested' for s in result)
+    assert result[0]['speaker'] != result[1]['speaker']
     provider.verify_identities = lambda identities: {}
     result = speaker_naming.identify_speaker_roles(segments[:1], provider, roles=['Maria Restrepo'])
-    assert result[0]['speaker_identity'] is None
+    assert result[0]['speaker_identity']['name'] == 'Maria Restrepo'
 
 
 def test_role_only_extraction_does_not_become_person_name():
@@ -304,7 +307,7 @@ def test_mario_introduction_keeps_name_when_exact_role_is_uncertain():
                                                     for key, value in identities.items()}
     result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider, roles=[candidate])
     assert result[0]['speaker_identity']['name'] == 'Mario Enrique Gómez Jiménez'
-    assert result[0]['speaker_identity']['role'] is None
+    assert result[0]['speaker_identity']['role'] == 'Procurador'
 
 
 def test_mario_introduction_accepts_both_fields_at_sixty_eight_percent():
@@ -317,14 +320,14 @@ def test_mario_introduction_accepts_both_fields_at_sixty_eight_percent():
     assert result[0]['speaker_identity']['role'] == 'Procurador'
 
 
-def test_uncertain_name_preserves_independently_verified_role():
+def test_second_verifier_no_longer_removes_classified_name_or_role():
     text = 'Soy Mario Gómez, procurador.'
     candidate = 'Mario Gómez (Procurador)'
     provider = _FakeProvider({text: True}, {text: (candidate, .85)})
     provider.verify_identities = lambda identities: {key: .55 if value['kind'] == 'name' else .90
                                                     for key, value in identities.items()}
     result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider, roles=[candidate])
-    assert result[0]['speaker_identity']['name'] is None
+    assert result[0]['speaker_identity']['name'] == 'Mario Gómez'
     assert result[0]['speaker_identity']['role'] == 'Procurador'
 
 
@@ -352,15 +355,16 @@ def test_explicit_mario_name_survives_role_only_candidate_selection():
     assert result[0]['speaker_identity']['role'] == 'Procurador'
 
 
-def test_proposed_name_context_excludes_embeddings_and_other_metadata():
+def test_suggestions_never_call_verifier_or_include_embedding_metadata():
     text = 'Mi nombre es Mario Enrique Gómez Jiménez, procurador.'
     provider = _FakeProvider({text: True}, {text: ('Procurador', .8)})
-    captured = {}
-    def verify(identities):
-        captured.update(identities)
-        return {key: .8 for key in identities}
+    def verify(_):
+        raise AssertionError('Secondary verification must not run')
     provider.verify_identities = verify
-    speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text, speaker_embedding=object())],
-                                          provider, roles=['Procurador'])
-    json.dumps(captured)
-    assert 'speaker_embedding' not in captured['SPEAKER_00:name']['context'][0]
+    result = speaker_naming.identify_speaker_roles(
+        [dict(_segments()[0], text=text, speaker_embedding=object())], provider, roles=['Procurador'])
+    identity = result[0]['speaker_identity']
+    json.dumps(identity)
+    assert identity['status'] == 'suggested'
+    assert identity['name'] == 'Mario Enrique Gómez Jiménez'
+    assert 'speaker_embedding' not in identity['evidence'][0]

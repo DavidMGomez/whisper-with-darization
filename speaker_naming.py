@@ -39,10 +39,9 @@ Pipeline:
    question per speaker, all packed into a single request, always
    including an explicit "cannot determine" option.
 
-4. Verification (Jev, batched): verify name and role separately at >= 0.68.
-   Names require literal evidence and an unambiguous link to the speaker.
-   Roles may be supported by procedural acts without a self-introduction.
-   These are provider scores, not calibrated probabilities of identity.
+4. Suggestions: keep the classified name and role at >= 0.68 without a
+   second identity-verification call. Every identity is explicitly suggested,
+   never confirmed. Provider scores are not calibrated identity probabilities.
 
 A provider/extraction failure at any tier is logged and treated as
 "unresolved" for the affected segments/speakers/list -- it never fails the
@@ -269,7 +268,7 @@ def identify_speaker_roles(
         logger.warning("Role classification failed, leaving speaker roles unresolved: %s", exc)
         results_by_label = {}
 
-    # Verify fields independently. A doubtful name must not erase a clear role.
+    # Identify name and role independently; both remain suggestions.
     own_segments = {}
     for seg in intro_segments:
         if seg.get('speaker'):
@@ -287,14 +286,12 @@ def identify_speaker_roles(
         candidate = next(c for c in candidate_role_names if c == result.speaker)
         name, role = split_identity(candidate)
         # Nearby turns support a direct answer to an explicit introduction;
-        # the verifier must still establish who is speaking, not just a mention.
+        # these remain unconfirmed suggestions until a person reviews them.
         context = [seg for i, seg in enumerate(intro_segments)
                    if seg.get('speaker') == label
                    or (i > 0 and intro_segments[i - 1].get('speaker') == label)
                    or (i + 1 < len(intro_segments) and intro_segments[i + 1].get('speaker') == label)]
-        context_text = ' '.join(seg.get('text', '') for seg in context)
-        name_supported = name and re.search(r'(?<!\w)' + re.escape(normalize(name)) + r'(?!\w)', normalize(context_text))
-        proposed[label] = {'name': name if name_supported else None, 'role': role,
+        proposed[label] = {'name': name, 'role': role,
                            'score': result.confidence, 'context': context}
 
     # Procedural roles can be evident without an introduction. Only classify
@@ -320,7 +317,7 @@ def identify_speaker_roles(
 
     # Explicit introductions must not lose their name when the closed choice
     # selected only a role (or the optional candidate extractor was unavailable).
-    # This supplies a literal candidate, never an accepted identity by itself.
+    # This supplies a literal suggestion, never a confirmed identity.
     for label, text in own_texts.items():
         literal_names = []
         for match in re.finditer(r'\b(?:mi nombre es|me llamo)\s+([^,.;:!?\n]{3,100})', text, re.IGNORECASE):
@@ -334,49 +331,23 @@ def identify_speaker_roles(
             if not proposal['name']:
                 proposal.update(name=literal_names[0], name_score=1.0)
 
-    verification = {}
-    for label, proposal in proposed.items():
-        for field in ('name', 'role'):
-            if proposal[field]:
-                verification[f'{label}:{field}'] = {
-                    'text': own_texts[label], 'identity': proposal[field], 'kind': field,
-                    'speaker': label, 'context': [
-                        {key: segment.get(key) for key in ('speaker', 'start', 'end', 'text')}
-                        for segment in proposal['context']] if field == 'name' else [],
-                }
-    try:
-        verified = provider.verify_identities(verification) if verification else {}
-    except Exception:
-        logger.warning('Identity verification unavailable; leaving speakers unresolved')
-        verified = {}
+    # Classification is a suggestion, not an independently verified identity.
+    # Do not run a second Jev verification or discard competing suggestions.
     identities = {}
     for label, proposal in proposed.items():
-        fields, scores = {}, {}
-        for field in ('name', 'role'):
-            score = verified.get(f'{label}:{field}')
-            if proposal[field] and valid_score(score):
-                fields[field] = proposal[field]
-                scores[field] = min(proposal.get('role_score', proposal['score']) if field == 'role'
-                                    else proposal.get('name_score', proposal['score']), score)
+        fields = {field: proposal[field] for field in ('name', 'role') if proposal[field]}
         if not fields:
             continue
+        scores = {field: proposal.get(field + '_score', proposal['score']) for field in fields}
         identities[label] = {
             'name': fields.get('name'), 'role': fields.get('role'),
             'label': str(_format_identity(fields.get('name'), fields.get('role'))),
+            'status': 'suggested', 'verified': False,
             'confidence': min(scores.values()),
             'name_confidence': scores.get('name'), 'role_confidence': scores.get('role'),
             'evidence': [{'start': seg.get('start'), 'end': seg.get('end'), 'text': seg.get('text', '')}
-                         for seg in (proposal['context'] if fields.get('name') else own_segments[label])],
+                         for seg in own_segments[label]],
         }
-    # A name shared by multiple clusters is ambiguous, but their roles can remain.
-    names = [normalize(identity['name']) for identity in identities.values() if identity['name']]
-    for label, identity in list(identities.items()):
-        if identity['name'] and names.count(normalize(identity['name'])) > 1:
-            if not identity['role']:
-                del identities[label]
-                continue
-            identity.update(name=None, name_confidence=None, label=identity['role'],
-                            confidence=identity['role_confidence'])
     logger.info('Speaker identification: %d clusters, %d names, %d roles', len(own_segments),
                 sum(bool(i['name']) for i in identities.values()), sum(bool(i['role']) for i in identities.values()))
 
