@@ -6,10 +6,10 @@ whisperx.DiarizationPipeline's output (columns: start, end, speaker), so it
 plugs directly into whisperx.assign_word_speakers without any change to the
 existing word/sentence assignment logic or the output schema clients depend on.
 
-It additionally returns per-segment confidence scores (derived from the raw
-frame-level speaker-activity probabilities), used to decide which speaker
-turns are ambiguous enough to send to a SpeakerConfirmationProvider.
+It returns speaker-specific activity probabilities for assignment gating.
+These are model scores, not calibrated probabilities of a real-world identity.
 """
+import math
 import pandas as pd
 import torch
 from transformers import AutoModelForAudioFrameClassification, AutoProcessor
@@ -56,9 +56,7 @@ def diarize(audio, max_num_speakers: int = 8):
         diarize_df: pandas.DataFrame with columns [start, end, speaker],
             shaped like whisperx.DiarizationPipeline's output.
         segment_confidences: list of dicts {start, end, speaker, confidence},
-            confidence being the mean margin between the winning speaker's
-            frame-level probability and the runner-up's (0..1, higher = more
-            certain). Used to gate confirmation-provider calls.
+            confidence is the assigned channel's mean activity probability.
     """
     processor, model = _load()
     inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
@@ -78,14 +76,6 @@ def diarize(audio, max_num_speakers: int = 8):
     frame_seconds = (
         processor.feature_extractor.hop_length / processor.feature_extractor.sampling_rate
     )
-    num_channels = probs.shape[-1]
-    k = min(2, num_channels)
-    top_values, _ = probs.topk(k, dim=-1)
-    if k == 2:
-        margin = top_values[:, 0] - top_values[:, 1]
-    else:
-        margin = top_values[:, 0]
-
     rows = []
     segment_confidences = []
     for seg in speaker_segments:
@@ -95,8 +85,8 @@ def diarize(audio, max_num_speakers: int = 8):
 
         frame_start = max(0, int(start / frame_seconds))
         frame_end = max(frame_start + 1, int(end / frame_seconds))
-        segment_margin = margin[frame_start:frame_end]
-        confidence = float(segment_margin.mean()) if len(segment_margin) else 0.0
+        activity = probs[frame_start:frame_end, int(speaker_idx)]
+        confidence = float(activity.mean()) if len(activity) else 0.0
         segment_confidences.append(
             {
                 "start": float(start),
@@ -114,7 +104,7 @@ def confidence_for_range(segment_confidences, start: float, end: float) -> float
     """Looks up the diarization confidence for a transcript segment's time
     range, matching against whichever diarization segment overlaps it most."""
     best_overlap = 0.0
-    best_confidence = 1.0
+    best_confidence = 0.0
     for seg in segment_confidences:
         overlap = min(seg["end"], end) - max(seg["start"], start)
         if overlap > best_overlap:
@@ -133,3 +123,26 @@ def distinct_speakers_in_range(segment_confidences, start: float, end: float) ->
         for seg in segment_confidences
         if min(seg["end"], end) > max(seg["start"], start)
     }
+
+
+def assignment_confidence(segment_confidences, start, end, speaker):
+    """Weighted activity for this speaker; uncovered time contributes zero.
+
+    Simultaneous speakers remain ambiguous for exclusive transcript attribution.
+    Never borrow confidence from whichever other voice happened to be loudest.
+    """
+    if not speaker or not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        return 0.0
+    weighted, covered = 0.0, 0.0
+    for row in segment_confidences:
+        overlap = max(0.0, min(end, row['end']) - max(start, row['start']))
+        if not overlap:
+            continue
+        if row['speaker'] != speaker:
+            return 0.0
+        score = row.get('confidence', 0)
+        if not math.isfinite(score) or not 0 <= score <= 1:
+            continue
+        weighted += overlap * score
+        covered += overlap
+    return min(1.0, weighted / max(end - start, covered)) if covered else 0.0

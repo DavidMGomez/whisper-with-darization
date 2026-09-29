@@ -257,6 +257,10 @@ class Predictor(BasePredictor):
                 result = self.align(audio, result)
                 result, segment_confidences = self.diarize(audio, result, max_num_speakers)
                 segments = result["segments"]
+                for segment in segments:
+                    segment["speaker_confidence"] = nemotron_diarization.assignment_confidence(
+                        segment_confidences, float(segment['start']), float(segment['end']), segment.get('speaker'))
+                    segment["speaker_confidence_source"] = "nemotron_activity_probability"
 
                 if classify_speaker_roles:
                     provider_api_key = jev_api_key if confirmation_provider == "jev" else None

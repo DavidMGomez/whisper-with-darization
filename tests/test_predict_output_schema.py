@@ -5,7 +5,7 @@ import pytest
 
 import predict
 
-LEGACY_SEGMENT_KEYS = {"start", "end", "text", "words", "speaker"}
+LEGACY_SEGMENT_KEYS = {"start", "end", "text", "words", "speaker", "speaker_confidence", "speaker_confidence_source"}
 
 
 def _fake_transcript_result():

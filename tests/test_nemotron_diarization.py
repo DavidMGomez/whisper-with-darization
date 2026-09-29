@@ -61,7 +61,7 @@ def test_diarize_returns_whisperx_shaped_dataframe(monkeypatch):
     assert high_confidence_segment["speaker"] == "SPEAKER_00"
     assert low_confidence_segment["speaker"] == "SPEAKER_01"
     assert high_confidence_segment["confidence"] > 0.9
-    assert low_confidence_segment["confidence"] < 0.1
+    assert low_confidence_segment["confidence"] == 0.5
     assert high_confidence_segment["confidence"] > low_confidence_segment["confidence"]
 
 
@@ -75,8 +75,8 @@ def test_confidence_for_range_picks_the_most_overlapping_segment():
     assert nemotron_diarization.confidence_for_range(segment_confidences, 1.1, 1.9) == 0.2
 
 
-def test_confidence_for_range_defaults_to_full_confidence_when_nothing_overlaps():
-    assert nemotron_diarization.confidence_for_range([], 0.0, 1.0) == 1.0
+def test_confidence_for_range_defaults_to_zero_when_nothing_overlaps():
+    assert nemotron_diarization.confidence_for_range([], 0.0, 1.0) == 0.0
 
 
 def test_distinct_speakers_in_range_only_counts_actual_overlap():
@@ -90,3 +90,13 @@ def test_distinct_speakers_in_range_only_counts_actual_overlap():
     # and fully contains the second -> only SPEAKER_05 counts.
     assert nemotron_diarization.distinct_speakers_in_range(segment_confidences, 1.0, 10.0) == {"SPEAKER_05"}
     assert nemotron_diarization.distinct_speakers_in_range(segment_confidences, 100.0, 101.0) == set()
+
+
+def test_assignment_confidence_matches_speaker_and_counts_uncovered_time():
+    rows = [{'start': 0., 'end': 1., 'speaker': 'SPEAKER_00', 'confidence': .9}]
+    assert nemotron_diarization.assignment_confidence(rows, 0, 1, 'SPEAKER_00') == .9
+    assert nemotron_diarization.assignment_confidence(rows, 0, 2, 'SPEAKER_00') == .45
+    assert nemotron_diarization.assignment_confidence(rows, 0, 1, 'SPEAKER_01') == 0
+    assert nemotron_diarization.assignment_confidence([], 0, 1, 'SPEAKER_00') == 0
+    rows.append({'start': .5, 'end': 1., 'speaker': 'SPEAKER_01', 'confidence': .95})
+    assert nemotron_diarization.assignment_confidence(rows, 0, 1, 'SPEAKER_00') == 0
