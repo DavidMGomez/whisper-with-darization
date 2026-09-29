@@ -18,7 +18,6 @@ from google.cloud import pubsub_v1
 from google.oauth2 import service_account
 import confirmation
 import nemotron_diarization
-import speaker_naming
 from transcription_helpers import transcribe_batched
 from whisper.tokenizer import LANGUAGES, TO_LANGUAGE_CODE
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
@@ -178,39 +177,11 @@ class Predictor(BasePredictor):
                         "one request per segment.",
             default=8
         ),
-        classify_speaker_roles: bool = Input(
-            description="If true, segments within "
-                        "speaker_role_window_seconds of the start are scanned for "
-                        "self-introductions or name/role mentions, and confirmation_provider is "
-                        "asked to classify each such speaker into one of hearing_roles. Segments "
-                        "get a speaker_role key (a role, or null if it couldn't be determined).",
-            default=False
-        ),
-        speaker_role_window_seconds: int = Input(
-            description="Only segments starting before this many seconds into the audio are "
-                        "considered for speaker-role classification -- legal hearings "
-                        "conventionally have everyone state their name/role near the start.",
-            default=speaker_naming.DEFAULT_INTRO_WINDOW_SECONDS
-        ),
-        hearing_roles: str = Input(
-            description="Comma-separated candidate list of names/roles to classify speakers "
-                        "into, skipping OpenAI extraction entirely. Leave unset to instead "
-                        "extract candidates from the hearing's own flagged segments via "
-                        f"openai_api_key (falling back to a fixed default universe if that "
-                        f"isn't set or fails: {', '.join(speaker_naming.DEFAULT_ROLES)}).",
-            default=None
-        ),
-        openai_api_key: str = Input(
-            description="API key used to extract candidate names/roles from the hearing's own "
-                        "flagged segments (Jev has no free-text question type, so this is a "
-                        "separate provider for that one open-ended step). Falls back to the "
-                        "OPENAI_API_KEY env var if not set; ignored if hearing_roles is set.",
-            default=None
-        ),
-        openai_model: str = Input(
-            description="OpenAI chat-completion model used for candidate name/role extraction.",
-            default=speaker_naming.DEFAULT_OPENAI_MODEL
-        )
+        classify_speaker_roles: bool = Input(description="Deprecated and ignored: identity runs in Cloud Functions.", default=False),
+        speaker_role_window_seconds: int = Input(description="Deprecated and ignored.", default=1800),
+        hearing_roles: str = Input(description="Deprecated and ignored.", default=None),
+        openai_api_key: str = Input(description="Deprecated and ignored; do not send identity keys to Replicate.", default=None),
+        openai_model: str = Input(description="Deprecated and ignored.", default="gpt-4o-mini")
     ) -> Output:
         if file_url is None:
             raise ValueError("ERROR: 'file_url' is required!")
@@ -262,17 +233,8 @@ class Predictor(BasePredictor):
                         segment_confidences, float(segment['start']), float(segment['end']), segment.get('speaker'))
                     segment["speaker_confidence_source"] = "nemotron_activity_probability"
 
-                if classify_speaker_roles:
-                    provider_api_key = jev_api_key if confirmation_provider == "jev" else None
-                    provider = confirmation.get_confirmation_provider(confirmation_provider, provider_api_key)
-                    segments = speaker_naming.identify_speaker_roles(
-                        segments,
-                        provider=provider,
-                        intro_window_seconds=speaker_role_window_seconds,
-                        roles=[r.strip() for r in hearing_roles.split(",")] if hearing_roles else None,
-                        openai_api_key=openai_api_key or os.environ.get("OPENAI_API_KEY"),
-                        openai_model=openai_model,
-                    )
+                # Names and roles are identified after every part is persisted,
+                # by multimedia_speaker_identity in Cloud Functions.
 
                 # Send success message to Pub/Sub if credentials are provided
                 pubsub_notified = None

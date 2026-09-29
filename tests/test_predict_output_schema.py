@@ -137,37 +137,12 @@ def test_legacy_confirmation_flag_cannot_reassign_nemotron_labels(monkeypatch, p
         assert "speaker_embedding" not in segment
 
 
-def test_classify_speaker_roles_resolves_role_end_to_end(monkeypatch, predictor):
-    class _StubProvider(predict.confirmation.SpeakerConfirmationProvider):
-        def confirm_speaker(self, text, candidate_speakers, context_before=None, context_after=None):
-            return predict.confirmation.ConfirmationResult(speaker="SPEAKER_00", confidence=0.99, raw={})
-
-        def confirm_continuation(self, established_context, established_speaker, candidate_texts):
-            return [
-                predict.confirmation.ContinuationResult(same_speaker=True, confidence=0.99, raw={})
-                for _ in candidate_texts
-            ]
-
-        def detect_identifying_content(self, texts):
-            return [True for _ in texts]
-
-        def verify_identities(self, candidates):
-            return {label: .9 for label in candidates}
-
-        def classify_roles(self, texts_by_label, candidate_roles):
-            return {
-                label: predict.confirmation.ConfirmationResult(speaker="Juez", confidence=0.9, raw={})
-                for label in texts_by_label
-            }
-
-    monkeypatch.setattr(predict.confirmation, "get_confirmation_provider", lambda name, api_key: _StubProvider())
-
+def test_legacy_identity_flag_does_not_call_identity_providers(monkeypatch, predictor):
+    monkeypatch.setattr(predict.confirmation, "get_confirmation_provider",
+                        lambda *a, **k: pytest.fail("Identity must run in the CPU function"))
     output = predictor.predict(**_base_kwargs(use_speaker_confirmation=True, classify_speaker_roles=True))
-
     for segment in output.segments:
         assert LEGACY_SEGMENT_KEYS.issubset(segment.keys())
-        assert segment["speaker_role"] == "Juez"
-        assert segment["speaker_identity"]["role"] == "Juez"
-        assert segment["speaker_identity"]["name"] is None
-        assert segment["speaker_identity"]["confidence"] == .9
-        assert segment["speaker_identity"]["evidence"]
+        assert "speaker_identity" not in segment
+        assert "speaker_role" not in segment
+        assert "speaker_name" not in segment
