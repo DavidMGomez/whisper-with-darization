@@ -1,0 +1,9 @@
+# Deliberately separate from requirements.txt: only what the mocked test
+# suite needs, so CI doesn't have to install CUDA torch, whisperx, or
+# speechbrain. See tests/conftest.py for what gets faked instead.
+pytest
+numpy
+pandas
+requests
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch

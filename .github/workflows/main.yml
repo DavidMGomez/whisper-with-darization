@@ -9,16 +9,115 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # replicate/setup-cog@v1.0.2 bundles a CUDA-toolkit install (via
+    # Jimver/cuda-toolkit) that isn't actually needed just to build and push
+    # a Docker image -- CUDA only matters at inference time, on Replicate's
+    # own GPUs. That bundled installer failed on both ubuntu-latest (gcc
+    # too new) and ubuntu-22.04 (a follow-up bug uploading its own failure
+    # log as a build artifact masked the real error). This workflow had 0
+    # successful runs ever. Installing the cog CLI directly sidesteps all
+    # of that.
+    runs-on: ubuntu-22.04
     steps:
       - name: Check out code
         uses: actions/checkout@v3
 
-      - name: Setup Cog
-        uses: replicate/setup-cog@v1.0.2
+      - name: Install Cog CLI
+        # Pinned to the same version replicate/setup-cog@v1.0.2 installs
+        # (v0.8.0-beta3). The "latest" cog release rejects a plain
+        # REPLICATE_API_TOKEN for `cog login --token-stdin` ("that looks
+        # like a Replicate API token, not a CLI auth token"); this older,
+        # officially-tested version accepts it -- and `docker push` needs
+        # that login to have configured registry auth, which just setting
+        # REPLICATE_API_TOKEN as an env var for `cog push` did not do
+        # ("authorization failed").
+        run: |
+          sudo curl -o /usr/local/bin/cog -L "https://github.com/replicate/cog/releases/download/v0.8.0-beta3/cog_Linux_x86_64"
+          sudo chmod +x /usr/local/bin/cog
+          cog --version
+
+      - name: Log in to Replicate
+        env:
+          REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+        run: echo "$REPLICATE_API_TOKEN" | cog login --token-stdin
+
+      - name: Download Whisper models
+        # build.sh does this, but it's meant to be run manually on a dev
+        # machine before `cog push` (Docker's build COPYs the checked-out
+        # repo dir as-is, models/ included) -- this workflow never ran it,
+        # so the pushed image had no model files at all, and
+        # faster-whisper's WhisperModel("./models/...") fell through to
+        # treating the local path as an (invalid) HuggingFace repo id.
+        # NOTE: build.sh's VAD download (get_vad_model_url.py) is skipped
+        # here -- it imports the now-removed `whisperx.vad` module (current
+        # whisperx HEAD moved VAD code to whisperx/vads/), so it's stale
+        # against the whisperx version we install. Not fixed here since
+        # it's a cold-start speed optimization, not a hard requirement:
+        # whisperx will just fetch the VAD model at runtime instead.
+        run: |
+          mkdir -p models/faster-whisper-large-v3
+          for f in config.json model.bin preprocessor_config.json tokenizer.json vocabulary.json; do
+            wget -O "models/faster-whisper-large-v3/$f" "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/$f"
+          done
+          mkdir -p models/faster-whisper-large-v3-turbo
+          for f in config.json model.bin preprocessor_config.json tokenizer.json vocabulary.json; do
+            wget -O "models/faster-whisper-large-v3-turbo/$f" "https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/$f"
+          done
+
+      - name: Download Nemotron-3-Diarization model
+        # Loading nvidia/Nemotron-3-Diarization by HF Hub id at request time
+        # hit a flaky "peer closed connection" downloading model.safetensors
+        # through Replicate's internal HF proxy -- same class of runtime
+        # network unreliability as the NLTK punkt_tab SSRF block. Baking the
+        # weights into the image (nemotron_diarization.py now loads from
+        # MODEL_PATH="./models/nemotron-3-diarization") removes that
+        # dependency the same way the Whisper models above already do.
+        run: |
+          mkdir -p models/nemotron-3-diarization
+          for f in config.json processor_config.json model.safetensors; do
+            wget -O "models/nemotron-3-diarization/$f" "https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/$f"
+          done
+
+      - name: Restore Docker image cache
+        # cog v0.8.0-beta3 has no remote-cache support of its own (no
+        # --cache-from/--cache-to, confirmed in its source), so the only way
+        # to give its build a head start is priming the local Docker
+        # daemon's layer cache from a previous run's saved image. Keyed on
+        # requirements.txt/cog.yaml so a dependency change starts fresh
+        # instead of reusing a stale, incompatible cache; falls back to the
+        # most recent cache for this branch otherwise so still-unchanged
+        # layers (system packages, python setup) can be reused even after a
+        # requirements.txt tweak. Best-effort: if this image is too large
+        # for actions/cache's limit, restore/save just no-op and the push
+        # still runs normally, uncached.
+        id: restore_docker_cache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
         with:
-          token: ${{ secrets.REPLICATE_API_TOKEN }}
+          path: /tmp/docker-image-cache/image.tar
+          key: docker-image-${{ github.ref_name }}-${{ hashFiles('requirements.txt', 'cog.yaml') }}
+          restore-keys: |
+            docker-image-${{ github.ref_name }}-
+
+      - name: Load cached image into Docker
+        if: steps.restore_docker_cache.outputs.cache-hit != ''
+        continue-on-error: true
+        run: docker load -i /tmp/docker-image-cache/image.tar
 
       - name: Push to Replicate
+        run: cog push r8.im/${{ inputs.model_name }}
+
+      - name: Save Docker image cache
+        if: always()
+        continue-on-error: true
         run: |
-          cog push r8.im/${{ inputs.model_name }}}
+          mkdir -p /tmp/docker-image-cache
+          docker save r8.im/${{ inputs.model_name }} -o /tmp/docker-image-cache/image.tar
+
+      - name: Cache Docker image
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/docker-image-cache/image.tar
+          key: docker-image-${{ github.ref_name }}-${{ hashFiles('requirements.txt', 'cog.yaml') }}

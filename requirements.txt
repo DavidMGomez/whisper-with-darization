@@ -1,13 +1,43 @@
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.1.0+cu121
-torchvision==0.16.0+cu121
-torchaudio==2.1.0+cu121
+# NOTE: nvidia/Nemotron-3-Diarization is loaded via transformers'
+# AutoModelForAudioFrameClassification/AutoProcessor (see
+# nemotron_diarization.py) -- not the native NeMo toolkit -- so nemo_toolkit
+# itself is not a dependency. Validate with `cog build` before deploying.
+# torch pinned to 2.8.0+cu128: whisperx's GitHub HEAD (3.8.7rc1) requires
+# torch~=2.8.0, which isn't available on the cu124 index (tops out at 2.6.0) --
+# confirmed cu128 publishes matching 2.8.0/0.23.0/2.8.0 torch/torchvision/torchaudio.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+torchaudio==2.8.0+cu128
+# openai-whisper's last PyPI release (20240930) is a source-only sdist whose
+# legacy setup.py does `import pkg_resources`; that fails to build under
+# uv/pip's isolated build env with a current setuptools ("ModuleNotFoundError:
+# No module named 'pkg_resources'") -- a pre-existing packaging break
+# unrelated to this migration, hit as soon as anyone tries a fresh build.
+# Installing from GitHub HEAD (same pattern already used for whisperx below)
+# picks up any packaging fixes made since that last PyPI release.
+setuptools<81
 ffmpeg-python
-pyannote.audio
 nltk
+requests
 google-cloud-pubsub
 pydub
-demucs
-speechbrain
-openai-whisper
+# nvidia/Nemotron-3-Diarization's own README says to install transformers
+# from source ("pip install git+https://github.com/huggingface/transformers"):
+# its custom Nemotron3DiarizationProcessor/NemotronAsrStreamingFeatureExtractor
+# classes aren't in any PyPI transformers release yet. Without this,
+# AutoProcessor.from_pretrained fails with "Unrecognized processing class".
+# Nemotron-3-Diarization's NemotronAsrStreamingFeatureExtractor needs
+# librosa for audio feature extraction ("NemotronAsrStreamingFeatureExtractor
+# requires the librosa library").
+librosa
+# AutoModelForAudioFrameClassification.from_pretrained(..., device_map="auto")
+# in nemotron_diarization.py requires accelerate for automatic device
+# placement; transformers doesn't pull it in as a hard dependency. Not hit
+# in any deploy yet (AutoProcessor.from_pretrained already failed earlier in
+# the same _load() call), but device_map="auto" would raise ImportError the
+# moment that got fixed.
+accelerate
+git+https://github.com/huggingface/transformers.git
+git+https://github.com/openai/whisper.git
 git+https://github.com/m-bain/whisperx.git

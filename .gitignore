@@ -1,3 +1,5 @@
 .cog
 .vscode
 __pycache__
+.venv-test
+.pytest_cache

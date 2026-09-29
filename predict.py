@@ -8,17 +8,16 @@ import tempfile
 import time
 import traceback
 import uuid
-from typing import List
+from typing import List, Optional
 import nltk
-import numpy as np
 import requests
 import torch
 import whisperx
 from cog import BasePredictor, BaseModel, Input
 from google.cloud import pubsub_v1
 from google.oauth2 import service_account
-from pydub import AudioSegment
-from speechbrain.pretrained import EncoderClassifier
+import confirmation
+import nemotron_diarization
 from transcription_helpers import transcribe_batched
 from whisper.tokenizer import LANGUAGES, TO_LANGUAGE_CODE
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
@@ -40,14 +39,24 @@ mtypes = {"cpu": "int8", "cuda": "float16"}
 
 compute_type = "float16"  # change to "int8" if low on GPU mem (may reduce accuracy)
 device = "cuda"
-whisper_arch = "./models/faster-whisper-large-v3"
+WHISPER_MODEL_PATHS = {
+    "large-v3": "./models/faster-whisper-large-v3",
+    "large-v3-turbo": "./models/faster-whisper-large-v3-turbo",
+}
 
 class Output(BaseModel):
     segments: List[dict]
+    pubsub_notified: Optional[bool] = None
 
 
-def send_pubsub_message(project_id, topic_id, message_dict, credentials):
-    """Sends a message to Google Pub/Sub."""
+def send_pubsub_message(project_id, topic_id, message_dict, credentials) -> bool:
+    """Sends a message to Google Pub/Sub. Returns whether it was actually delivered.
+
+    Never raises: a Pub/Sub outage must not fail the underlying prediction. But since
+    the caller's status ends up looking "successful" to Replicate either way, the
+    return value lets predict() surface real delivery status in Output instead of it
+    only living in a Replicate container log nobody's watching.
+    """
     try:
         # Decode the base64 encoded credentials
         decoded_credentials = base64.b64decode(credentials).decode('utf-8')
@@ -65,60 +74,19 @@ def send_pubsub_message(project_id, topic_id, message_dict, credentials):
         # Publish the message
         future = publisher.publish(topic_path, json.dumps(message_dict).encode('utf-8'))
         future.result()  # Verify that the message was published successfully
+        return True
 
     except Exception as e:
         logging.error(f"Failed to send message to Pub/Sub: {e}")
         traceback.print_exc()
+        return False
 
-
-def get_audio_segment(signal, start_time, end_time):
-    """Extracts a segment of the audio signal between start_time and end_time."""
-    return signal[int(start_time * 1000):int(end_time * 1000)]  # Convert seconds to milliseconds
-
-
-
-def get_sentences_speaker_mapping( sentences, audio):
-    """
-    Processes the list of words with speaker labels and groups them into sentences
-    with speaker embeddings.
-
-    Args:
-        sentences (list): List of dictionaries containing words with start_time, end_time, word, speaker.
-        audio (AudioSegment): AudioSegment object of the audio.
-
-    Returns:
-        list: List of sentences with speaker embeddings.
-    """
-    classifier = EncoderClassifier.from_hparams(
-        source="speechbrain/spkrec-ecapa-voxceleb",
-        savedir="tmp_speechbrain"
-    )
-    # Extract speaker embeddings
-    for segment in sentences:
-        try:
-            audio_segment = get_audio_segment(audio, segment["start"], segment["end"])
-            # Convert audio segment to numpy array
-            samples = np.array(audio_segment.get_array_of_samples()).astype(np.float32)
-            # Normalize samples
-            max_abs_value = float(1 << (8 * audio_segment.sample_width - 1))
-            samples = samples / max_abs_value
-            # Convert to tensor
-            audio_tensor = torch.from_numpy(samples).unsqueeze(0)
-            # Compute embeddings
-            wav_lens = torch.tensor([1.0])
-            embeddings = classifier.encode_batch(audio_tensor, wav_lens)
-            # Save embeddings
-            embeddings_np = embeddings.squeeze().detach().cpu().numpy()
-            segment["speaker_embedding"] = embeddings_np.tolist()  # Convert to list for JSON serialization
-        except:
-            pass
-    return sentences
 
 
 class Predictor(BasePredictor):
     def setup(self):
         """Load necessary models and configurations."""
-        nltk.download('punkt')
+        nltk.download('punkt_tab')
         source_folder = './models/vad'
         destination_folder = '../root/.cache/torch'
         file_name = 'whisperx-vad-segmentation.bin'
@@ -142,6 +110,13 @@ class Predictor(BasePredictor):
             description="Batch size for batched inference",
             default=8
         ),
+        whisper_model: str = Input(
+            description="Which faster-whisper model to transcribe with. large-v3-turbo is "
+                        "2-4x faster with a small (~1-2%) WER increase; large-v3 is kept for "
+                        "rollback if turbo's accuracy isn't good enough for a given use case.",
+            default="large-v3-turbo",
+            choices=["large-v3", "large-v3-turbo"]
+        ),
         multimedia_part_id: str = Input(
             description="Multimedia part ID", default=None
         ),
@@ -155,41 +130,74 @@ class Predictor(BasePredictor):
             description="GCP Service Account Credentials", default=None
         ),
         hf_token: str = Input(
-            description="HuggingFace token", default="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"
+            description="Deprecated, unused since diarization no longer depends on a gated "
+                        "HuggingFace model. Kept only so existing callers that pass it don't break.",
+            default=None
         ),
         min_num_speakers: int = Input(
             description="Min number of speakers", default=None
         ),
         max_num_speakers: int = Input(
             description="Max number of speakers", default=None
-        )
+        ),
+        use_speaker_confirmation: bool = Input(
+            description="Deprecated and ignored: speaker labels come exclusively from Nemotron.",
+            default=False
+        ),
+        confirmation_provider: str = Input(
+            description="Which confirmation provider to use when use_speaker_confirmation is true. "
+                        "See confirmation.PROVIDERS for the registry of supported providers.",
+            default="jev"
+        ),
+        jev_api_key: str = Input(
+            description="API key for the 'jev' confirmation provider (ignored for other "
+                        "providers). Falls back to the JEV_API_KEY env var if not set.",
+            default=None
+        ),
+        confirmation_confidence_threshold: float = Input(
+            description="Diarization segments with a speaker-confidence score below this "
+                        "(0-1) are sent for confirmation when use_speaker_confirmation is true. "
+                        "We require >67% confidence to trust Nemotron's raw assignment as-is.",
+            default=0.67
+        ),
+        confirmation_gap_threshold_seconds: float = Input(
+            description="Segments preceded by a silence gap longer than this (seconds) are sent "
+                        "for confirmation when use_speaker_confirmation is true, since a long "
+                        "pause makes a speaker change more likely.",
+            default=1.5
+        ),
+        confirmation_context_window: int = Input(
+            description="How many trailing same-speaker segments feed the established context "
+                        "that continuation checks compare each ambiguous segment against.",
+            default=3
+        ),
+        confirmation_batch_size: int = Input(
+            description="How many consecutive ambiguous segments get batched into a single "
+                        "confirmation-provider request (multiple questions, one call) instead of "
+                        "one request per segment.",
+            default=8
+        ),
+        classify_speaker_roles: bool = Input(description="Deprecated and ignored: identity runs in Cloud Functions.", default=False),
+        speaker_role_window_seconds: int = Input(description="Deprecated and ignored.", default=1800),
+        hearing_roles: str = Input(description="Deprecated and ignored.", default=None),
+        openai_api_key: str = Input(description="Deprecated and ignored; do not send identity keys to Replicate.", default=None),
+        openai_model: str = Input(description="Deprecated and ignored.", default="gpt-4o-mini")
     ) -> Output:
         if file_url is None:
             raise ValueError("ERROR: 'file_url' is required!")
 
         random_uuid = uuid.uuid4()
         vocal_target  = f"temp-{random_uuid}.wav"
-        temp_outputs_dir = f"temp_{random_uuid}_outputs"
 
         try:
             # Download and convert audio to WAV
             vocal_target = self.download_audio_and_convert_to_wav(file_url,vocal_target)
 
-            # Separate vocals using Demucs
-            self.separate_vocals(vocal_target, temp_outputs_dir)
-
-            # Update vocal_target to point to the separated vocals
-            vocal_target = os.path.join(
-                temp_outputs_dir,
-                "htdemucs",
-                os.path.splitext(os.path.basename(vocal_target))[0],
-                "vocals.wav",
-            )
-
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
             start_time = time.time_ns() / 1e6
             
+            whisper_arch = WHISPER_MODEL_PATHS[whisper_model]
             model = whisperx.load_model(whisper_arch, device, compute_type=compute_type, language=language,
                                         asr_options={"temperatures": [0]}, vad_options={"vad_onset": 0.500,"vad_offset": 0.363})
             
@@ -216,24 +224,29 @@ class Predictor(BasePredictor):
             torch.cuda.empty_cache()
             del model
 
-            if language in wav2vec2_langs:   
+            if language in wav2vec2_langs:
                 result = self.align(audio, result)
-                result = self.diarize(audio, result, hf_token, min_num_speakers, max_num_speakers)
-                # Get sentences with speaker mapping
-                segments = get_sentences_speaker_mapping(
-                    result["segments"],
-                    AudioSegment.from_file(vocal_target).set_channels(1)
-                )
+                result, segment_confidences = self.diarize(audio, result, max_num_speakers)
+                segments = result["segments"]
+                for segment in segments:
+                    segment["speaker_confidence"] = nemotron_diarization.assignment_confidence(
+                        segment_confidences, float(segment['start']), float(segment['end']), segment.get('speaker'))
+                    segment["speaker_confidence_source"] = "nemotron_activity_probability"
+
+                # Names and roles are identified after every part is persisted,
+                # by multimedia_speaker_identity in Cloud Functions.
+
                 # Send success message to Pub/Sub if credentials are provided
+                pubsub_notified = None
                 if credentials and project_id and topic_id and multimedia_part_id:
-                    send_pubsub_message(
+                    pubsub_notified = send_pubsub_message(
                         project_id,
                         topic_id,
                         {"id": multimedia_part_id, "status": "success"},
                         credentials
                     )
 
-                return Output(segments=segments)
+                return Output(segments=segments, pubsub_notified=pubsub_notified)
 
             else:
                 # Handle case where language is not supported
@@ -256,28 +269,26 @@ class Predictor(BasePredictor):
             try:
                 if 'vocal_target' in locals() and os.path.exists(vocal_target):
                     os.remove(vocal_target)
-                if os.path.exists(temp_outputs_dir):
-                    shutil.rmtree(temp_outputs_dir)
             except Exception as cleanup_exception:
                 logging.warning(f"Error during cleanup: {cleanup_exception}")
 
-    def diarize(self, audio, result, huggingface_access_token, min_speakers, max_speakers):
+    def diarize(self, audio, result, max_speakers):
         start_time = time.time_ns() / 1e6
 
-        diarize_model = whisperx.DiarizationPipeline(use_auth_token=huggingface_access_token, device=device)
-        diarize_segments = diarize_model(audio, min_speakers=min_speakers, max_speakers=max_speakers)
-
+        max_num_speakers = max_speakers if max_speakers else 8
+        diarize_segments, segment_confidences = nemotron_diarization.diarize(
+            audio, max_num_speakers=max_num_speakers
+        )
         result = whisperx.assign_word_speakers(diarize_segments, result)
 
-      
         elapsed_time = time.time_ns() / 1e6 - start_time
         print(f"Duration to diarize segments: {elapsed_time:.2f} ms")
 
         gc.collect()
         torch.cuda.empty_cache()
-        del diarize_model
+        nemotron_diarization.unload()
 
-        return result
+        return result, segment_confidences
 
     def align(self, audio, result):
         start_time = time.time_ns() / 1e6
@@ -329,24 +340,3 @@ class Predictor(BasePredictor):
 
         os.remove(temp_audio_filename)
         return temp_wav_filename
-
-    def separate_vocals(self, audio_path, output_dir):
-        """Separates vocals from the audio using Demucs."""
-        command_demucs = [
-            'python3', '-m', 'demucs.separate',
-            '-n', 'htdemucs',
-            '--two-stems=vocals',
-            audio_path,
-            '-o', output_dir
-        ]
-        logging.info(f"Running Demucs command: {' '.join(command_demucs)}")
-        try:
-            subprocess.run(
-                command_demucs,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Demucs separation failed: {e.stderr.decode()}")
-            raise RuntimeError(f"Demucs separation failed: {e.stderr.decode()}")

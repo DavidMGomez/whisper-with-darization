@@ -1,8 +1,26 @@
 build:
-  cuda: "12.1"
+  # cog v0.8.0-beta3 (the only version whose `cog login --token-stdin`
+  # accepts our plain REPLICATE_API_TOKEN -- see main.yml) only recognizes
+  # CUDA versions up to 12.1.1 in its base-image allowlist and errors with
+  # "CUDA 12.8 is not supported by Cog" otherwise. This only picks the base
+  # Docker image's system CUDA toolkit; the torch==2.8.0+cu128 wheels in
+  # requirements.txt bundle their own CUDA runtime libraries and only need a
+  # new-enough NVIDIA driver on the host, which Replicate's GPUs have.
+  cuda: "12.1.1"
   gpu: true
   system_packages:
     - "ffmpeg"
-  python_version: "3.11"
+    - "libsndfile1"
+  python_version: "3.12"
   python_requirements: requirements.txt
+  run:
+    # whisperx's alignment step needs NLTK's punkt_tab data (not the older
+    # 'punkt' predict.py's setup() downloads). Fetching it at request time on
+    # Replicate fails: their runtime egress goes through a proxy, and current
+    # NLTK refuses proxied fetches for SSRF-safety (CWE-918) unless opted in.
+    # Baking it into the image here means it's already on disk before the
+    # container ever runs, so no runtime network fetch is needed at all --
+    # this build step's own network access (GitHub Actions, no proxy) is
+    # unaffected by that restriction.
+    - "python3 -c \"import nltk; nltk.download('punkt_tab')\""
 predict: "predict.py:Predictor"
