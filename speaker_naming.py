@@ -39,9 +39,9 @@ Pipeline:
    question per speaker, all packed into a single request, always
    including an explicit "cannot determine" option.
 
-4. Verification (Jev, batched): require explicit self-identification,
-   a choice score and verification score >= 0.70, and a name occurring in
-   the speaker's own text. Preserve structured name, role and source evidence.
+4. Verification (Jev, batched): verify name and role separately at >= 0.68.
+   Names require literal evidence and an unambiguous link to the speaker.
+   Roles may be supported by procedural acts without a self-introduction.
    These are provider scores, not calibrated probabilities of identity.
 
 A provider/extraction failure at any tier is logged and treated as
@@ -67,7 +67,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 DEFAULT_INTRO_WINDOW_SECONDS = 1800
-MIN_IDENTITY_CONFIDENCE = 0.70
+MIN_IDENTITY_CONFIDENCE = 0.68
 
 # Fallback only, used when OpenAI extraction isn't configured or fails --
 # a deliberately long, general-purpose universe covering civil, criminal,
@@ -217,7 +217,7 @@ def identify_speaker_roles(
         return segments
 
     if not math.isfinite(confidence_threshold) or not MIN_IDENTITY_CONFIDENCE <= confidence_threshold <= 1:
-        raise ValueError("Identity confidence must be between 0.70 and 1")
+        raise ValueError("Identity confidence must be between 0.68 and 1")
     for seg in segments:
         seg["speaker_identity"] = None
         seg["speaker_name"] = None
@@ -269,50 +269,117 @@ def identify_speaker_roles(
         logger.warning("Role classification failed, leaving speaker roles unresolved: %s", exc)
         results_by_label = {}
 
-    # A high choice score alone does not establish that a mentioned person
-    # is the speaker. Require a second, explicit self-identification check.
+    # Verify fields independently. A doubtful name must not erase a clear role.
+    own_segments = {}
+    for seg in intro_segments:
+        if seg.get('speaker'):
+            own_segments.setdefault(seg['speaker'], []).append(seg)
+    own_texts = {label: ' '.join(seg.get('text', '') for seg in rows)
+                 for label, rows in own_segments.items()}
     proposed = {}
+    def valid_score(score):
+        return (not isinstance(score, bool) and isinstance(score, (int, float))
+                and math.isfinite(score) and confidence_threshold <= score <= 1)
     for label, result in results_by_label.items():
-        if (label not in texts_by_label or result.speaker == CANNOT_DETERMINE
-                or result.speaker not in candidate_roles
-                or not math.isfinite(result.confidence)
-                or not confidence_threshold <= result.confidence <= 1):
+        if (label not in own_texts or result.speaker == CANNOT_DETERMINE
+                or result.speaker not in candidate_roles or not valid_score(result.confidence)):
             continue
-        candidate = next(candidate for candidate in candidate_role_names if candidate == result.speaker)
+        candidate = next(c for c in candidate_role_names if c == result.speaker)
         name, role = split_identity(candidate)
-        if name and not re.search(r"(?<!\w)" + re.escape(normalize(name)) + r"(?!\w)", normalize(texts_by_label[label])):
-            continue
-        proposed[label] = result
-    try:
-        verified = provider.verify_identities({
-            label: {"text": texts_by_label[label], "identity": result.speaker}
-            for label, result in proposed.items()
-        }) if proposed else {}
-    except Exception:  # Unsupported providers must fail closed for identity assignment.
-        logger.warning("Identity verification unavailable; leaving speakers unresolved")
-        verified = {}
+        # Nearby turns support a direct answer to an explicit introduction;
+        # the verifier must still establish who is speaking, not just a mention.
+        context = [seg for i, seg in enumerate(intro_segments)
+                   if seg.get('speaker') == label
+                   or (i > 0 and intro_segments[i - 1].get('speaker') == label)
+                   or (i + 1 < len(intro_segments) and intro_segments[i + 1].get('speaker') == label)]
+        context_text = ' '.join(seg.get('text', '') for seg in context)
+        name_supported = name and re.search(r'(?<!\w)' + re.escape(normalize(name)) + r'(?!\w)', normalize(context_text))
+        proposed[label] = {'name': name if name_supported else None, 'role': role,
+                           'score': result.confidence, 'context': context}
 
+    # Procedural roles can be evident without an introduction. Only classify
+    # missing roles, in one batched request, using this speaker's own statements.
+    missing_roles = {label: text for label, text in own_texts.items()
+                     if not proposed.get(label, {}).get('role')}
+    role_options = list(dict.fromkeys(DEFAULT_ROLES + [split_identity(c)[1] for c in candidate_role_names
+                                                      if split_identity(c)[1]]))
+    if missing_roles:
+        try:
+            role_results = provider.classify_roles(missing_roles, candidate_roles={
+                **{role: f'The speaker performs the procedural role of {role}; distinguish a party from their lawyer'
+                   for role in role_options}, CANNOT_DETERMINE: 'Insufficient evidence for a procedural role'})
+        except Exception:
+            logger.warning('Independent role classification unavailable')
+            role_results = {}
+        for label, result in role_results.items():
+            if label in missing_roles and result.speaker in role_options and valid_score(result.confidence):
+                proposal = proposed.setdefault(label, {'name': None, 'role': None, 'score': result.confidence,
+                                                       'context': own_segments[label]})
+                proposal['role'] = result.speaker
+                proposal['role_score'] = result.confidence
+
+    # Explicit introductions must not lose their name when the closed choice
+    # selected only a role (or the optional candidate extractor was unavailable).
+    # This supplies a literal candidate, never an accepted identity by itself.
+    for label, text in own_texts.items():
+        literal_names = []
+        for match in re.finditer(r'\b(?:mi nombre es|me llamo)\s+([^,.;:!?\n]{3,100})', text, re.IGNORECASE):
+            value = re.split(r'\s+(?:y soy|y act[uú]o|en calidad de|identificado|identificada)\b',
+                             match.group(1), maxsplit=1, flags=re.IGNORECASE)[0].strip()
+            if 2 <= len(value.split()) <= 6 and all(char.isalpha() or char in " '-" for char in value):
+                literal_names.append(value)
+        if len({normalize(value) for value in literal_names}) == 1:
+            proposal = proposed.setdefault(label, {'name': None, 'role': None, 'score': 1.0,
+                                                   'context': own_segments[label]})
+            if not proposal['name']:
+                proposal.update(name=literal_names[0], name_score=1.0)
+
+    verification = {}
+    for label, proposal in proposed.items():
+        for field in ('name', 'role'):
+            if proposal[field]:
+                verification[f'{label}:{field}'] = {
+                    'text': own_texts[label], 'identity': proposal[field], 'kind': field,
+                    'speaker': label, 'context': [
+                        {key: segment.get(key) for key in ('speaker', 'start', 'end', 'text')}
+                        for segment in proposal['context']] if field == 'name' else [],
+                }
+    try:
+        verified = provider.verify_identities(verification) if verification else {}
+    except Exception:
+        logger.warning('Identity verification unavailable; leaving speakers unresolved')
+        verified = {}
     identities = {}
-    for label, result in proposed.items():
-        score = verified.get(label)
-        if (isinstance(score, bool) or not isinstance(score, (float, int))
-                or not math.isfinite(score) or not confidence_threshold <= score <= 1):
+    for label, proposal in proposed.items():
+        fields, scores = {}, {}
+        for field in ('name', 'role'):
+            score = verified.get(f'{label}:{field}')
+            if proposal[field] and valid_score(score):
+                fields[field] = proposal[field]
+                scores[field] = min(proposal.get('role_score', proposal['score']) if field == 'role'
+                                    else proposal.get('name_score', proposal['score']), score)
+        if not fields:
             continue
-        candidate = next(candidate for candidate in candidate_role_names if candidate == result.speaker)
-        name, role = split_identity(candidate)
         identities[label] = {
-            "name": name, "role": role, "label": result.speaker,
-            "confidence": min(result.confidence, score),
-            "evidence": [
-                {"start": seg.get("start"), "end": seg.get("end"), "text": seg.get("text", "")}
-                for seg in intro_segments
-                if seg.get("speaker") == label and seg.get("text", "") in flagged_texts_by_label[label]
-            ],
+            'name': fields.get('name'), 'role': fields.get('role'),
+            'label': str(_format_identity(fields.get('name'), fields.get('role'))),
+            'confidence': min(scores.values()),
+            'name_confidence': scores.get('name'), 'role_confidence': scores.get('role'),
+            'evidence': [{'start': seg.get('start'), 'end': seg.get('end'), 'text': seg.get('text', '')}
+                         for seg in (proposal['context'] if fields.get('name') else own_segments[label])],
         }
-    # Conflicting diarization clusters require review, not an automatic merge.
-    names = [normalize(identity["name"]) for identity in identities.values() if identity["name"]]
-    identities = {label: identity for label, identity in identities.items()
-                  if not identity["name"] or names.count(normalize(identity["name"])) == 1}
+    # A name shared by multiple clusters is ambiguous, but their roles can remain.
+    names = [normalize(identity['name']) for identity in identities.values() if identity['name']]
+    for label, identity in list(identities.items()):
+        if identity['name'] and names.count(normalize(identity['name'])) > 1:
+            if not identity['role']:
+                del identities[label]
+                continue
+            identity.update(name=None, name_confidence=None, label=identity['role'],
+                            confidence=identity['role_confidence'])
+    logger.info('Speaker identification: %d clusters, %d names, %d roles', len(own_segments),
+                sum(bool(i['name']) for i in identities.values()), sum(bool(i['role']) for i in identities.values()))
+
     for seg in segments:
         identity = identities.get(seg.get("speaker"))
         seg["speaker_identity"] = identity
@@ -324,7 +391,8 @@ def identify_speaker_roles(
 
 def normalize(text):
     text = unicodedata.normalize("NFKD", text.casefold())
-    return " ".join("".join(c for c in text if not unicodedata.combining(c)).split())
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[^\w]+", " ", text).split())
 
 
 def split_identity(label):

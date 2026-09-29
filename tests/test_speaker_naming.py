@@ -221,7 +221,7 @@ def test_extract_candidate_identities_failure_degrades_gracefully(monkeypatch):
 
 def test_rejects_low_unknown_and_nonfinite_confidence():
     import pytest
-    for candidate, score in [('Juez', .69), ('Intruso', 1), ('Juez', float('nan')), ('Juez', float('inf'))]:
+    for candidate, score in [('Juez', .67), ('Intruso', 1), ('Juez', float('nan')), ('Juez', float('inf'))]:
         text = _segments()[0]['text']
         provider = _FakeProvider({text: True}, {text: (candidate, score)})
         result = speaker_naming.identify_speaker_roles(_segments(), provider, roles=['Juez'])
@@ -231,7 +231,7 @@ def test_rejects_low_unknown_and_nonfinite_confidence():
 def test_mention_is_not_identity_when_verifier_rejects():
     text = 'La abogada Maria Restrepo tiene la palabra.'
     provider = _FakeProvider({text: True}, {text: ('Maria Restrepo', .99)})
-    provider.verify_identities = lambda identities: {'SPEAKER_00': .1}
+    provider.verify_identities = lambda identities: {key: .1 for key in identities}
     segments = [dict(_segments()[0], text=text)]
     result = speaker_naming.identify_speaker_roles(segments, provider, roles=['Maria Restrepo'])
     assert result[0]['speaker_name'] is None
@@ -289,8 +289,78 @@ def test_identity_threshold_cannot_be_lowered():
 def test_identity_accepts_supported_brief_introduction_at_seventy_percent():
     text = 'Carlos Perez, defensor.'
     provider = _FakeProvider({text: True}, {text: ('Carlos Perez (Defensor)', .70)})
-    provider.verify_identities = lambda identities: {'SPEAKER_00': .70}
+    provider.verify_identities = lambda identities: {key: .70 for key in identities}
     result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider,
                                                  roles=['Carlos Perez (Defensor)'])
     assert result[0]['speaker_identity']['name'] == 'Carlos Perez'
     assert result[0]['speaker_identity']['confidence'] == .70
+
+
+def test_mario_introduction_keeps_name_when_exact_role_is_uncertain():
+    text = 'Mi nombre es Mario Enrique Gómez Jiménez, Procurador 115 Judicial 2 de la Delegatura de Asuntos Penales.'
+    candidate = 'Mario Enrique Gómez Jiménez (Procurador)'
+    provider = _FakeProvider({text: True}, {text: (candidate, .80)})
+    provider.verify_identities = lambda identities: {key: .90 if value['kind'] == 'name' else .55
+                                                    for key, value in identities.items()}
+    result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider, roles=[candidate])
+    assert result[0]['speaker_identity']['name'] == 'Mario Enrique Gómez Jiménez'
+    assert result[0]['speaker_identity']['role'] is None
+
+
+def test_mario_introduction_accepts_both_fields_at_sixty_eight_percent():
+    text = 'Mi nombre es Mario Enrique Gómez Jiménez, Procurador 115 Judicial 2 de la Delegatura de Asuntos Penales.'
+    candidate = 'Mario Enrique Gómez Jiménez (Procurador)'
+    provider = _FakeProvider({text: True}, {text: (candidate, .68)})
+    provider.verify_identities = lambda identities: {key: .68 for key in identities}
+    result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider, roles=[candidate])
+    assert result[0]['speaker_identity']['name'] == 'Mario Enrique Gómez Jiménez'
+    assert result[0]['speaker_identity']['role'] == 'Procurador'
+
+
+def test_uncertain_name_preserves_independently_verified_role():
+    text = 'Soy Mario Gómez, procurador.'
+    candidate = 'Mario Gómez (Procurador)'
+    provider = _FakeProvider({text: True}, {text: (candidate, .85)})
+    provider.verify_identities = lambda identities: {key: .55 if value['kind'] == 'name' else .90
+                                                    for key, value in identities.items()}
+    result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider, roles=[candidate])
+    assert result[0]['speaker_identity']['name'] is None
+    assert result[0]['speaker_identity']['role'] == 'Procurador'
+
+
+def test_procedural_role_does_not_require_an_introduction_flag():
+    text = 'Se instala la audiencia. El despacho deniega la solicitud y concede el recurso.'
+    provider = _FakeProvider({}, {text: ('Juez', .9)})
+    result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider, roles=['Juez'])
+    assert result[0]['speaker_identity']['name'] is None
+    assert result[0]['speaker_identity']['role'] == 'Juez'
+
+
+def test_punctuation_does_not_erase_a_literal_name():
+    text = 'Mi nombre es Mario Enrique, Gómez Jiménez.'
+    name = 'Mario Enrique Gómez Jiménez'
+    provider = _FakeProvider({text: True}, {text: (name, .9)})
+    result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider, roles=[name])
+    assert result[0]['speaker_identity']['name'] == name
+
+
+def test_explicit_mario_name_survives_role_only_candidate_selection():
+    text = 'Mi nombre es Mario Enrique Gómez Jiménez, Procurador 115 Judicial 2 de la Delegatura de Asuntos Penales.'
+    provider = _FakeProvider({text: True}, {text: ('Procurador', .8)})
+    result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider, roles=['Procurador'])
+    assert result[0]['speaker_identity']['name'] == 'Mario Enrique Gómez Jiménez'
+    assert result[0]['speaker_identity']['role'] == 'Procurador'
+
+
+def test_proposed_name_context_excludes_embeddings_and_other_metadata():
+    text = 'Mi nombre es Mario Enrique Gómez Jiménez, procurador.'
+    provider = _FakeProvider({text: True}, {text: ('Procurador', .8)})
+    captured = {}
+    def verify(identities):
+        captured.update(identities)
+        return {key: .8 for key in identities}
+    provider.verify_identities = verify
+    speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text, speaker_embedding=object())],
+                                          provider, roles=['Procurador'])
+    json.dumps(captured)
+    assert 'speaker_embedding' not in captured['SPEAKER_00:name']['context'][0]
