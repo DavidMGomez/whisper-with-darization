@@ -39,6 +39,11 @@ Pipeline:
    question per speaker, all packed into a single request, always
    including an explicit "cannot determine" option.
 
+4. Verification (Jev, batched): require explicit self-identification,
+   a choice score and verification score >= 0.70, and a name occurring in
+   the speaker's own text. Preserve structured name, role and source evidence.
+   These are provider scores, not calibrated probabilities of identity.
+
 A provider/extraction failure at any tier is logged and treated as
 "unresolved" for the affected segments/speakers/list -- it never fails the
 whole prediction, the same tolerance confirmation.py already applies to
@@ -52,6 +57,9 @@ across parts is out of scope for this module.
 """
 import json
 import logging
+import math
+import re
+import unicodedata
 from typing import Dict, List, Optional
 
 import requests
@@ -59,6 +67,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 DEFAULT_INTRO_WINDOW_SECONDS = 1800
+MIN_IDENTITY_CONFIDENCE = 0.70
 
 # Fallback only, used when OpenAI extraction isn't configured or fails --
 # a deliberately long, general-purpose universe covering civil, criminal,
@@ -92,6 +101,14 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 OPENAI_CHAT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 
 
+class IdentityLabel(str):
+    """Keep extracted name/role fields without breaking legacy string callers."""
+    def __new__(cls, label, name, role):
+        value = super().__new__(cls, label)
+        value.name, value.role = name or None, role or None
+        return value
+
+
 def _format_identity(name: Optional[str], role: Optional[str]) -> Optional[str]:
     """Combines a person's name and role into one display label, preferring
     "Name (Role)" when both are known, degrading to just whichever one is
@@ -100,8 +117,8 @@ def _format_identity(name: Optional[str], role: Optional[str]) -> Optional[str]:
     name = name.strip() if isinstance(name, str) else ""
     role = role.strip() if isinstance(role, str) else ""
     if name and role:
-        return f"{name} ({role})"
-    return name or role or None
+        return IdentityLabel(f"{name} ({role})", name, role)
+    return IdentityLabel(name or role, name, role) if name or role else None
 
 
 def extract_candidate_identities(
@@ -181,7 +198,7 @@ def identify_speaker_roles(
     provider,
     intro_window_seconds: int = DEFAULT_INTRO_WINDOW_SECONDS,
     roles: Optional[List[str]] = None,
-    confidence_threshold: float = 0.5,
+    confidence_threshold: float = MIN_IDENTITY_CONFIDENCE,
     openai_api_key: Optional[str] = None,
     openai_model: str = DEFAULT_OPENAI_MODEL,
 ) -> List[dict]:
@@ -198,6 +215,13 @@ def identify_speaker_roles(
     """
     if provider is None or not segments:
         return segments
+
+    if not math.isfinite(confidence_threshold) or not MIN_IDENTITY_CONFIDENCE <= confidence_threshold <= 1:
+        raise ValueError("Identity confidence must be between 0.70 and 1")
+    for seg in segments:
+        seg["speaker_identity"] = None
+        seg["speaker_name"] = None
+        seg["speaker_role"] = None
 
     intro_segments = [seg for seg in segments if seg.get("start", 0) < intro_window_seconds]
     if not intro_segments:
@@ -216,7 +240,7 @@ def identify_speaker_roles(
     flagged_texts_by_label: Dict[str, List[str]] = {}
     for seg, flagged in zip(intro_segments, flags):
         label = seg.get("speaker")
-        if flagged and label:
+        if flagged is True and label:
             flagged_texts_by_label.setdefault(label, []).append(seg.get("text", ""))
 
     if roles:
@@ -245,12 +269,68 @@ def identify_speaker_roles(
         logger.warning("Role classification failed, leaving speaker roles unresolved: %s", exc)
         results_by_label = {}
 
-    label_to_role: Dict[str, Optional[str]] = {}
+    # A high choice score alone does not establish that a mentioned person
+    # is the speaker. Require a second, explicit self-identification check.
+    proposed = {}
     for label, result in results_by_label.items():
-        if result.speaker != CANNOT_DETERMINE and result.confidence >= confidence_threshold:
-            label_to_role[label] = result.speaker
+        if (label not in texts_by_label or result.speaker == CANNOT_DETERMINE
+                or result.speaker not in candidate_roles
+                or not math.isfinite(result.confidence)
+                or not confidence_threshold <= result.confidence <= 1):
+            continue
+        candidate = next(candidate for candidate in candidate_role_names if candidate == result.speaker)
+        name, role = split_identity(candidate)
+        if name and not re.search(r"(?<!\w)" + re.escape(normalize(name)) + r"(?!\w)", normalize(texts_by_label[label])):
+            continue
+        proposed[label] = result
+    try:
+        verified = provider.verify_identities({
+            label: {"text": texts_by_label[label], "identity": result.speaker}
+            for label, result in proposed.items()
+        }) if proposed else {}
+    except Exception:  # Unsupported providers must fail closed for identity assignment.
+        logger.warning("Identity verification unavailable; leaving speakers unresolved")
+        verified = {}
 
+    identities = {}
+    for label, result in proposed.items():
+        score = verified.get(label)
+        if (isinstance(score, bool) or not isinstance(score, (float, int))
+                or not math.isfinite(score) or not confidence_threshold <= score <= 1):
+            continue
+        candidate = next(candidate for candidate in candidate_role_names if candidate == result.speaker)
+        name, role = split_identity(candidate)
+        identities[label] = {
+            "name": name, "role": role, "label": result.speaker,
+            "confidence": min(result.confidence, score),
+            "evidence": [
+                {"start": seg.get("start"), "end": seg.get("end"), "text": seg.get("text", "")}
+                for seg in intro_segments
+                if seg.get("speaker") == label and seg.get("text", "") in flagged_texts_by_label[label]
+            ],
+        }
+    # Conflicting diarization clusters require review, not an automatic merge.
+    names = [normalize(identity["name"]) for identity in identities.values() if identity["name"]]
+    identities = {label: identity for label, identity in identities.items()
+                  if not identity["name"] or names.count(normalize(identity["name"])) == 1}
     for seg in segments:
-        seg["speaker_role"] = label_to_role.get(seg.get("speaker"))
-
+        identity = identities.get(seg.get("speaker"))
+        seg["speaker_identity"] = identity
+        seg["speaker_name"] = identity["name"] if identity else None
+        # Keep the existing display-label contract for older consumers.
+        seg["speaker_role"] = identity["label"] if identity else None
     return segments
+
+
+def normalize(text):
+    text = unicodedata.normalize("NFKD", text.casefold())
+    return " ".join("".join(c for c in text if not unicodedata.combining(c)).split())
+
+
+def split_identity(label):
+    if isinstance(label, IdentityLabel):
+        return label.name, label.role
+    if label in DEFAULT_ROLES:
+        return None, label
+    match = re.fullmatch(r"(.+?) \(([^()]+)\)", label)
+    return (match.group(1), match.group(2)) if match else (label, None)

@@ -12,6 +12,9 @@ class _FakeProvider(confirmation.SpeakerConfirmationProvider):
         self._role_by_text = role_by_text
         self.classify_calls = []
 
+    def verify_identities(self, identities):
+        return {label: 0.99 for label in identities}
+
     def confirm_speaker(self, *a, **k):
         raise NotImplementedError
 
@@ -48,7 +51,7 @@ def test_identify_speaker_roles_resolves_flagged_speakers():
         },
         role_by_text={
             "Buenos dias, soy la jueza de este despacho.": ("Juez", 0.95),
-            "Gracias senoria, represento al demandante.": ("Demandante", 0.9),
+            "Gracias senoria, represento al demandante.": ("Demandante", 0.95),
         },
     )
 
@@ -140,8 +143,12 @@ def test_identify_speaker_roles_uses_extracted_identities_when_available(monkeyp
         role_by_text={"Buenos dias, soy la jueza de este despacho.": ("Maria Fernanda Restrepo", 0.95)},
     )
 
+    segments = _segments()
+    segments[0]["text"] = "Soy Maria Fernanda Restrepo"
+    provider._flags_by_text = {segments[0]["text"]: True}
+    provider._role_by_text = {segments[0]["text"]: ("Maria Fernanda Restrepo", .99)}
     result = speaker_naming.identify_speaker_roles(
-        _segments(), provider=provider, openai_api_key="sk-fake"
+        segments, provider=provider, openai_api_key="sk-fake"
     )
 
     classified_roles = provider.classify_calls[0][1]
@@ -210,3 +217,80 @@ def test_extract_candidate_identities_failure_degrades_gracefully(monkeypatch):
 
     assert speaker_naming.extract_candidate_identities(["algo"], api_key="sk-fake") == []
 
+
+
+def test_rejects_low_unknown_and_nonfinite_confidence():
+    import pytest
+    for candidate, score in [('Juez', .69), ('Intruso', 1), ('Juez', float('nan')), ('Juez', float('inf'))]:
+        text = _segments()[0]['text']
+        provider = _FakeProvider({text: True}, {text: (candidate, score)})
+        result = speaker_naming.identify_speaker_roles(_segments(), provider, roles=['Juez'])
+        assert result[0]['speaker_identity'] is None
+
+
+def test_mention_is_not_identity_when_verifier_rejects():
+    text = 'La abogada Maria Restrepo tiene la palabra.'
+    provider = _FakeProvider({text: True}, {text: ('Maria Restrepo', .99)})
+    provider.verify_identities = lambda identities: {'SPEAKER_00': .1}
+    segments = [dict(_segments()[0], text=text)]
+    result = speaker_naming.identify_speaker_roles(segments, provider, roles=['Maria Restrepo'])
+    assert result[0]['speaker_name'] is None
+
+
+def test_named_identity_has_evidence_and_separate_fields():
+    text = 'Mi nombre es Maria Restrepo y soy la jueza.'
+    provider = _FakeProvider({text: True}, {text: ('Maria Restrepo (Juez)', .98)})
+    result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider,
+                                                 roles=['Maria Restrepo (Juez)'])
+    identity = result[0]['speaker_identity']
+    assert (identity['name'], identity['role'], identity['confidence']) == ('Maria Restrepo', 'Juez', .98)
+    assert identity['evidence'][0]['text'] == text
+
+
+def test_missing_verification_and_duplicate_names_fail_closed():
+    text = 'Mi nombre es Maria Restrepo.'
+    provider = _FakeProvider({text: True}, {text: ('Maria Restrepo', .99)})
+    segments = [dict(_segments()[0], text=text), dict(_segments()[1], text=text)]
+    result = speaker_naming.identify_speaker_roles(segments, provider, roles=['Maria Restrepo'])
+    assert all(s['speaker_identity'] is None for s in result)
+    provider.verify_identities = lambda identities: {}
+    result = speaker_naming.identify_speaker_roles(segments[:1], provider, roles=['Maria Restrepo'])
+    assert result[0]['speaker_identity'] is None
+
+
+def test_role_only_extraction_does_not_become_person_name():
+    candidate = speaker_naming._format_identity(None, 'Jueza de familia')
+    assert speaker_naming.split_identity(candidate) == (None, 'Jueza de familia')
+
+
+def test_jev_verification_batches_and_checks_explicit_self_identification(monkeypatch):
+    provider = confirmation.JevConfirmationProvider(api_key='unused')
+    captured = {}
+    def post(**kwargs):
+        captured.update(kwargs)
+        return {'identity_0': {'noul': .99}, 'identity_1': {'noul': .2}}
+    monkeypatch.setattr(provider, '_post', post)
+    answer = provider.verify_identities({
+        'S0': {'text': 'Soy Maria Restrepo', 'identity': 'Maria Restrepo'},
+        'S1': {'text': 'Escuchemos a Maria Restrepo', 'identity': 'Maria Restrepo'},
+    })
+    assert answer == {'S0': .99, 'S1': .2}
+    assert len(captured['questions']) == 2
+    assert captured['questions']['identity_0']['type'] == 'noul'
+    assert 'another person' in captured['questions']['identity_0']['instructions']['focus']
+
+
+def test_identity_threshold_cannot_be_lowered():
+    import pytest
+    with pytest.raises(ValueError):
+        speaker_naming.identify_speaker_roles(_segments(), _FakeProvider({}, {}), confidence_threshold=.5)
+
+
+def test_identity_accepts_supported_brief_introduction_at_seventy_percent():
+    text = 'Carlos Perez, defensor.'
+    provider = _FakeProvider({text: True}, {text: ('Carlos Perez (Defensor)', .70)})
+    provider.verify_identities = lambda identities: {'SPEAKER_00': .70}
+    result = speaker_naming.identify_speaker_roles([dict(_segments()[0], text=text)], provider,
+                                                 roles=['Carlos Perez (Defensor)'])
+    assert result[0]['speaker_identity']['name'] == 'Carlos Perez'
+    assert result[0]['speaker_identity']['confidence'] == .70
