@@ -22,10 +22,6 @@ nltk
 requests
 google-cloud-pubsub
 pydub
-# Pinned for the same reason as nemo_toolkit was: unpinned speechbrain let
-# pip backtrack all the way down to the 0.5.x line (years old), which pins
-# torch<=1.11, conflicting with our torch==2.4 pin.
-speechbrain==1.1.0
 # nvidia/Nemotron-3-Diarization's own README says to install transformers
 # from source ("pip install git+https://github.com/huggingface/transformers"):
 # its custom Nemotron3DiarizationProcessor/NemotronAsrStreamingFeatureExtractor

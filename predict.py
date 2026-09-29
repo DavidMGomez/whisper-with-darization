@@ -10,15 +10,12 @@ import traceback
 import uuid
 from typing import List, Optional
 import nltk
-import numpy as np
 import requests
 import torch
 import whisperx
 from cog import BasePredictor, BaseModel, Input
 from google.cloud import pubsub_v1
 from google.oauth2 import service_account
-from pydub import AudioSegment
-from speechbrain.pretrained import EncoderClassifier
 import confirmation
 import nemotron_diarization
 import speaker_naming
@@ -86,66 +83,6 @@ def send_pubsub_message(project_id, topic_id, message_dict, credentials) -> bool
         return False
 
 
-def get_audio_segment(signal, start_time, end_time):
-    """Extracts a segment of the audio signal between start_time and end_time."""
-    return signal[int(start_time * 1000):int(end_time * 1000)]  # Convert seconds to milliseconds
-
-
-def get_sentences_speaker_mapping(sentences, audio):
-    """
-    Processes the list of words with speaker labels and groups them into sentences
-    with speaker embeddings.
-
-    Args:
-        sentences (list): List of dictionaries containing words with start_time, end_time, word, speaker.
-        audio (AudioSegment): AudioSegment object of the audio.
-
-    Returns:
-        list: List of sentences with speaker embeddings.
-    """
-    # Baked into the image at build time (see .github/workflows/main.yml's
-    # "Download speechbrain spkrec-ecapa-voxceleb model" step) rather than
-    # loaded from the HF Hub id at request time: Replicate's runtime network
-    # path to huggingface.co goes through an internal proxy that isn't fully
-    # reliable (hit a flaky "peer closed connection" mid-download here, the
-    # same class of failure already seen for Nemotron-3-Diarization's
-    # weights).
-    #
-    # `source` alone isn't enough: it only controls where from_hparams()
-    # fetches hyperparams.yaml itself from. That YAML hardcodes its own
-    # `pretrained_path: speechbrain/spkrec-ecapa-voxceleb`, which is what
-    # the paths for embedding_model.ckpt/mean_var_norm_emb.ckpt/
-    # classifier.ckpt/label_encoder.txt actually interpolate from -- so
-    # without overriding it, the individual checkpoint fetches still hit
-    # the HF Hub id regardless of `source`. The override below points that
-    # variable at the same local directory so every fetch stays local.
-    LOCAL_SPKREC_PATH = "./models/spkrec-ecapa-voxceleb"
-    classifier = EncoderClassifier.from_hparams(
-        source=LOCAL_SPKREC_PATH,
-        savedir="tmp_speechbrain",
-        overrides={"pretrained_path": LOCAL_SPKREC_PATH},
-    )
-    # Extract speaker embeddings
-    for segment in sentences:
-        try:
-            audio_segment = get_audio_segment(audio, segment["start"], segment["end"])
-            # Convert audio segment to numpy array
-            samples = np.array(audio_segment.get_array_of_samples()).astype(np.float32)
-            # Normalize samples
-            max_abs_value = float(1 << (8 * audio_segment.sample_width - 1))
-            samples = samples / max_abs_value
-            # Convert to tensor
-            audio_tensor = torch.from_numpy(samples).unsqueeze(0)
-            # Compute embeddings
-            wav_lens = torch.tensor([1.0])
-            embeddings = classifier.encode_batch(audio_tensor, wav_lens)
-            # Save embeddings
-            embeddings_np = embeddings.squeeze().detach().cpu().numpy()
-            segment["speaker_embedding"] = embeddings_np.tolist()  # Convert to list for JSON serialization
-        except:
-            pass
-    return sentences
-
 
 class Predictor(BasePredictor):
     def setup(self):
@@ -205,9 +142,7 @@ class Predictor(BasePredictor):
             description="Max number of speakers", default=None
         ),
         use_speaker_confirmation: bool = Input(
-            description="If true, ambiguous speaker-turn assignments (low diarization confidence "
-                        "or a large time gap since the previous turn) are double-checked against "
-                        "conversational context using confirmation_provider.",
+            description="Deprecated and ignored: speaker labels come exclusively from Nemotron.",
             default=False
         ),
         confirmation_provider: str = Input(
@@ -244,7 +179,7 @@ class Predictor(BasePredictor):
             default=8
         ),
         classify_speaker_roles: bool = Input(
-            description="If true (and use_speaker_confirmation is also true), segments within "
+            description="If true, segments within "
                         "speaker_role_window_seconds of the start are scanned for "
                         "self-introductions or name/role mentions, and confirmation_provider is "
                         "asked to classify each such speaker into one of hearing_roles. Segments "
@@ -321,35 +256,19 @@ class Predictor(BasePredictor):
             if language in wav2vec2_langs:
                 result = self.align(audio, result)
                 result, segment_confidences = self.diarize(audio, result, max_num_speakers)
-                segments = get_sentences_speaker_mapping(
-                    result["segments"],
-                    AudioSegment.from_file(vocal_target).set_channels(1)
-                )
+                segments = result["segments"]
 
-                if use_speaker_confirmation:
-                    # jev_api_key only applies to the "jev" provider; a future provider would get
-                    # its own <provider>_api_key input wired in here the same way.
+                if classify_speaker_roles:
                     provider_api_key = jev_api_key if confirmation_provider == "jev" else None
                     provider = confirmation.get_confirmation_provider(confirmation_provider, provider_api_key)
-                    segments = confirmation.annotate_and_confirm(
+                    segments = speaker_naming.identify_speaker_roles(
                         segments,
-                        segment_confidences,
-                        confidence_threshold=confirmation_confidence_threshold,
-                        gap_threshold_seconds=confirmation_gap_threshold_seconds,
                         provider=provider,
-                        context_window=confirmation_context_window,
-                        batch_size=confirmation_batch_size,
+                        intro_window_seconds=speaker_role_window_seconds,
+                        roles=[r.strip() for r in hearing_roles.split(",")] if hearing_roles else None,
+                        openai_api_key=openai_api_key or os.environ.get("OPENAI_API_KEY"),
+                        openai_model=openai_model,
                     )
-
-                    if classify_speaker_roles:
-                        segments = speaker_naming.identify_speaker_roles(
-                            segments,
-                            provider=provider,
-                            intro_window_seconds=speaker_role_window_seconds,
-                            roles=[r.strip() for r in hearing_roles.split(",")] if hearing_roles else None,
-                            openai_api_key=openai_api_key or os.environ.get("OPENAI_API_KEY"),
-                            openai_model=openai_model,
-                        )
 
                 # Send success message to Pub/Sub if credentials are provided
                 pubsub_notified = None

@@ -1,15 +1,11 @@
-"""Regression test: confirms the Nemotron/Jev migration didn't change the
-Output.segments schema that existing clients (xirius-captionWave-functions)
-already depend on -- and that turning use_speaker_confirmation on only adds
-keys, never removes or renames the legacy ones.
-"""
+"""Nemotron labels stay intact; voice embeddings and turn reassignment are retired."""
 import numpy as np
 import pandas as pd
 import pytest
 
 import predict
 
-LEGACY_SEGMENT_KEYS = {"start", "end", "text", "words", "speaker", "speaker_embedding"}
+LEGACY_SEGMENT_KEYS = {"start", "end", "text", "words", "speaker"}
 
 
 def _fake_transcript_result():
@@ -114,10 +110,11 @@ def test_output_schema_unchanged_when_confirmation_disabled(predictor):
         assert LEGACY_SEGMENT_KEYS.issubset(segment.keys())
         assert set(segment.keys()) == LEGACY_SEGMENT_KEYS  # no new keys leak in by default
         assert segment["speaker"] == "SPEAKER_00"
-        assert isinstance(segment["speaker_embedding"], list)
+        assert "speaker_embedding" not in segment
 
 
-def test_confirmation_adds_only_additive_keys_when_enabled(monkeypatch, predictor):
+def test_legacy_confirmation_flag_cannot_reassign_nemotron_labels(monkeypatch, predictor):
+    monkeypatch.setattr(predict.confirmation, "annotate_and_confirm", lambda *a, **k: pytest.fail("Turn reassignment must not run"))
     class _StubProvider(predict.confirmation.SpeakerConfirmationProvider):
         def confirm_speaker(self, text, candidate_speakers, context_before=None, context_after=None):
             return predict.confirmation.ConfirmationResult(speaker="SPEAKER_00", confidence=0.99, raw={})
@@ -135,9 +132,9 @@ def test_confirmation_adds_only_additive_keys_when_enabled(monkeypatch, predicto
 
     for segment in output.segments:
         assert LEGACY_SEGMENT_KEYS.issubset(segment.keys())
-        assert "speaker_confidence" in segment
-        assert "jev_checked" in segment
-        assert "speaker_confirmed_by" in segment
+        assert segment["speaker"] == "SPEAKER_00"
+        assert "jev_checked" not in segment
+        assert "speaker_embedding" not in segment
 
 
 def test_classify_speaker_roles_resolves_role_end_to_end(monkeypatch, predictor):
